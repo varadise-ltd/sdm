@@ -1,0 +1,11 @@
+{
+  "name": "cosmos-sdm",
+  "private": true,
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev": "npm --workspace @sdm/web run dev",
+    "build": "npm --workspace @sdm/web run build",
+    "start": "npm --workspace @sdm/web run start",
+    "lint": "npm --workspace @sdm/web run lint"
+  }
+}

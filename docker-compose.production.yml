@@ -1,0 +1,58 @@
+name: sdm-production
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: SDM-prod
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-3001}:3000"
+    environment:
+      NODE_ENV: production
+      SDM_AUTH_MODE: oidc
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?Set OIDC_ISSUER_URL}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?Set OIDC_AUDIENCE}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:?Set OIDC_JWKS_URL}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_END_SESSION_ENDPOINT: ${OIDC_END_SESSION_ENDPOINT:-}
+      KEYCLOAK_ISSUER_URL: ${KEYCLOAK_ISSUER_URL:-}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-cosmos}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
+      SDM_OIDC_REDIRECT_URI: ${SDM_OIDC_REDIRECT_URI:-}
+      SDM_OIDC_POST_LOGOUT_REDIRECT_URI: ${SDM_OIDC_POST_LOGOUT_REDIRECT_URI:-}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      S3_STORAGE_MODE: s3
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      S3_SIGNED_URL_TTL_SECONDS: ${S3_SIGNED_URL_TTL_SECONDS:-900}
+      SDM_FILE_SCAN_MODE: ${SDM_FILE_SCAN_MODE:-required}
+    command: ["npm", "--workspace", "@sdm/web", "run", "start"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: SDM-prod-worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      S3_STORAGE_MODE: s3
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY}
+      SDM_FILE_SCAN_MODE: ${SDM_FILE_SCAN_MODE:-required}
+    command: ["npm", "--workspace", "@sdm/web", "run", "worker"]

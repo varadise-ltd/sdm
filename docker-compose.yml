@@ -1,0 +1,171 @@
+name: sdm
+
+services:
+  # Development workspace for the SDM API and future platform services.
+  app:
+    image: node:22-bookworm-slim
+    container_name: SDM
+    working_dir: /workspace
+    command: ["npm", "--workspace", "@sdm/web", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - .:/workspace
+      - sdm_node_modules:/workspace/node_modules
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: development
+      SDM_AUTH_MODE: ${SDM_AUTH_MODE:-local}
+      SDM_DEV_USER_EMAIL: ${SDM_DEV_USER_EMAIL:-pm.project001@sdm.local}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
+      KEYCLOAK_ISSUER_URL: ${KEYCLOAK_ISSUER_URL:-}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-cosmos}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-cosmos-sdm}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_END_SESSION_ENDPOINT: ${OIDC_END_SESSION_ENDPOINT:-}
+      SDM_OIDC_REDIRECT_URI: ${SDM_OIDC_REDIRECT_URI:-http://localhost:3001/api/auth/oidc/callback}
+      SDM_OIDC_POST_LOGOUT_REDIRECT_URI: ${SDM_OIDC_POST_LOGOUT_REDIRECT_URI:-http://localhost:3001/login}
+      S3_STORAGE_MODE: ${S3_STORAGE_MODE:-filesystem}
+      S3_LOCAL_DIR: ${S3_LOCAL_DIR:-/workspace/.local-storage}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sdm}:${POSTGRES_PASSWORD:-sdm_dev_password}@db:5432/${POSTGRES_DB:-sdm}
+      S3_ENDPOINT: http://storage:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-sdm-files}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-sdm}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-sdm_storage_password}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-sdm}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-sdm_storage_password}
+      SDM_FILE_SCAN_MODE: ${SDM_FILE_SCAN_MODE:-development}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - sdm-network
+
+  worker:
+    image: node:22-bookworm-slim
+    container_name: SDM-worker
+    working_dir: /workspace
+    command: ["npm", "--workspace", "@sdm/web", "run", "worker"]
+    volumes:
+      - .:/workspace
+      - sdm_node_modules:/workspace/node_modules
+    environment:
+      NODE_ENV: development
+      SDM_AUTH_MODE: ${SDM_AUTH_MODE:-local}
+      SDM_DEV_USER_EMAIL: ${SDM_DEV_USER_EMAIL:-pm.project001@sdm.local}
+      S3_STORAGE_MODE: ${S3_STORAGE_MODE:-filesystem}
+      S3_LOCAL_DIR: ${S3_LOCAL_DIR:-/workspace/.local-storage}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sdm}:${POSTGRES_PASSWORD:-sdm_dev_password}@db:5432/${POSTGRES_DB:-sdm}
+      S3_ENDPOINT: http://storage:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-sdm-files}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-sdm}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-sdm_storage_password}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-sdm}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-sdm_storage_password}
+      SDM_FILE_SCAN_MODE: ${SDM_FILE_SCAN_MODE:-development}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - sdm-network
+
+  db:
+    image: postgres:16-alpine
+    container_name: SDM-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sdm}
+      POSTGRES_USER: ${POSTGRES_USER:-sdm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdm_dev_password}
+      TZ: Asia/Hong_Kong
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - sdm_postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+      - ./database/migrations:/opt/sdm/migrations:ro
+      - ./database/seeds:/opt/sdm/seeds:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - sdm-network
+
+  storage:
+    profiles: ["storage"]
+    image: minio/minio:latest
+    container_name: SDM-storage
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-sdm}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-sdm_storage_password}
+    ports:
+      - "${S3_PORT:-9000}:9000"
+      - "${S3_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - sdm_object_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - sdm-network
+
+  storage-init:
+    profiles: ["storage"]
+    image: minio/mc:latest
+    container_name: SDM-storage-init
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://storage:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD && mc mb --ignore-existing local/$$S3_BUCKET"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-sdm}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-sdm_storage_password}
+      S3_BUCKET: ${S3_BUCKET:-sdm-files}
+    depends_on:
+      storage:
+        condition: service_healthy
+    networks:
+      - sdm-network
+
+  # Optional local Keycloak realm for future COSMOS integration. It is not
+  # started by the default stack and has no production credentials baked in.
+  keycloak:
+    profiles: ["keycloak"]
+    image: quay.io/keycloak/keycloak:26.3.3
+    container_name: SDM-keycloak
+    command: ["start-dev", "--http-port=8080", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-change-me-before-use}
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"
+    volumes:
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
+      - sdm_keycloak_data:/opt/keycloak/data
+    networks:
+      - sdm-network
+
+volumes:
+  sdm_postgres_data:
+    name: SDM-postgres-data
+  sdm_node_modules:
+    name: SDM-node-modules
+  sdm_object_data:
+    name: SDM-object-data
+  sdm_keycloak_data:
+    name: SDM-keycloak-data
+
+networks:
+  sdm-network:
+    name: SDM-network

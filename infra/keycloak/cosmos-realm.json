@@ -1,0 +1,25 @@
+{
+  "realm": "cosmos",
+  "enabled": true,
+  "displayName": "COSMOS SDM local integration",
+  "passwordPolicy": "length(8) and upperCase(1) and lowerCase(1) and specialChars(1)",
+  "registrationAllowed": false,
+  "rememberMe": true,
+  "clients": [
+    {
+      "clientId": "cosmos-sdm",
+      "name": "COSMOS SDM local browser client",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:3001/api/auth/oidc/callback"],
+      "webOrigins": ["http://localhost:3001"],
+      "attributes": {"pkce.code.challenge.method": "S256"},
+      "protocolMappers": [
+        {"name": "audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "config": {"included.client.audience": "cosmos-sdm", "id.token.claim": "true", "access.token.claim": "true"}}
+      ]
+    }
+  ]
+}
