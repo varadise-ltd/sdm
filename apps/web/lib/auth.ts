@@ -137,13 +137,12 @@ export async function getCurrentUser(request: Request): Promise<AuthUser> {
 
   if (token) {
     identity = await verifyOidcToken(token);
-  } else if (isLocalAuthEnabled()) {
+  } else {
     sessionUserId = await resolveSessionUserId(request);
+
     if (sessionUserId) {
       identity = { subject: `session:${sessionUserId}` };
     } else if (authMode === "development") {
-      // Development mode intentionally retains the header fallback for local
-      // seeded workflow testing. Set SDM_AUTH_MODE=local to require login.
       const email = request.headers.get("x-sdm-user-email") ?? process.env.SDM_DEV_USER_EMAIL ?? "pm.project001@sdm.local";
       identity = {
         subject: `dev:${email.toLowerCase()}`,
@@ -153,9 +152,29 @@ export async function getCurrentUser(request: Request): Promise<AuthUser> {
     } else {
       throw new AuthError(401, "Authentication is required");
     }
-  } else {
-    throw new AuthError(401, "Authentication is required");
   }
+
+  // if (token) {
+  //   identity = await verifyOidcToken(token);
+  // } else if (isLocalAuthEnabled()) {
+  //   sessionUserId = await resolveSessionUserId(request);
+  //   if (sessionUserId) {
+  //     identity = { subject: `session:${sessionUserId}` };
+  //   } else if (authMode === "development") {
+  //     // Development mode intentionally retains the header fallback for local
+  //     // seeded workflow testing. Set SDM_AUTH_MODE=local to require login.
+  //     const email = request.headers.get("x-sdm-user-email") ?? process.env.SDM_DEV_USER_EMAIL ?? "pm.project001@sdm.local";
+  //     identity = {
+  //       subject: `dev:${email.toLowerCase()}`,
+  //       email,
+  //       displayName: "Local SDM Developer",
+  //     };
+  //   } else {
+  //     throw new AuthError(401, "Authentication is required");
+  //   }
+  // } else {
+  //   throw new AuthError(401, "Authentication is required");
+  // }
 
   const result = sessionUserId
     ? await db.query<{
