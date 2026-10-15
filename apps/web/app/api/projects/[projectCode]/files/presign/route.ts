@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { authErrorResponse, requireProjectMembership, type SdmRole } from "../../../../../../lib/auth";
 import { db } from "../../../../../../lib/db";
-import { buildStorageKey, createUploadUrl, isFilesystemStorage, sanitizeFilename } from "../../../../../../lib/storage";
+import { assertStorageConfigured, buildStorageKey, storageMode, storageErrorResponse, sanitizeFilename } from "../../../../../../lib/storage";
 
 export const runtime = "nodejs";
 
@@ -20,6 +20,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       return NextResponse.json({ error: { code: "INVALID_FILE", message: "filename, mimeType and byteSize are required; files are limited to 5 GB" } }, { status: 400 });
     }
 
+    assertStorageConfigured();
     const fileId = randomUUID();
     const storageKey = buildStorageKey(membership.projectId, fileId, filename);
     await db.query(
@@ -28,16 +29,11 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       [fileId, membership.projectId, storageKey, filename, mimeType, byteSize, user.id],
     );
 
-    if (isFilesystemStorage()) {
-      // Relative URLs stay valid behind a reverse proxy and avoid exposing the
-      // container's internal 0.0.0.0:3000 listener to browser clients.
-      const uploadUrl = `/api/projects/${encodeURIComponent(projectCode)}/files/${fileId}/upload`;
-      return NextResponse.json({ data: { fileId, storageKey, uploadUrl, headers: { "content-type": mimeType }, expiresIn: 900, storageMode: "filesystem" } }, { status: 201 });
-    }
-    const signed = await createUploadUrl(storageKey, mimeType);
-    return NextResponse.json({ data: { fileId, storageKey, uploadUrl: signed.url, headers: signed.headers, expiresIn: signed.expiresIn, storageMode: "s3" } }, { status: 201 });
+    // Keep the existing reservation API, but all bytes now pass through SDM.
+    const uploadUrl = `/api/projects/${encodeURIComponent(projectCode)}/files/${fileId}/upload`;
+    return NextResponse.json({ data: { fileId, storageKey, uploadUrl, headers: { "content-type": mimeType }, storageMode: storageMode(), uploadMode: "server" } }, { status: 201 });
   } catch (error) {
-    return authErrorResponse(error);
+    return storageErrorResponse(error) ?? authErrorResponse(error);
   }
 }
 

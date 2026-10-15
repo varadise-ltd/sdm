@@ -11,7 +11,8 @@
     "lint": "npm --workspace @sdm/web run lint",
     "test:browser": "node scripts/smoke-browser.mjs",
     "test:recovery": "node scripts/smoke-browser-recovery.mjs",
-    "test:workflow": "node scripts/smoke-workflow.mjs"
+    "test:workflow": "node scripts/smoke-workflow.mjs",
+    "test:obs": "node scripts/smoke-obs-server.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1"

@@ -2,17 +2,15 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { authErrorResponse, requireProjectMembership, type SdmRole } from "../../../../../../lib/auth";
 import { db } from "../../../../../../lib/db";
-import { buildStorageKey, createUploadUrl, isFilesystemStorage, sanitizeFilename } from "../../../../../../lib/storage";
+import { assertStorageConfigured, buildStorageKey, storageMode, storageErrorResponse, sanitizeFilename } from "../../../../../../lib/storage";
 
 export const runtime = "nodejs";
 
 const uploadRoles: readonly SdmRole[] = ["contractor_pm", "document_controller", "subcontractor", "supplier", "design_consultant"];
 
 /**
- * Batch upload is deliberately a presign operation. The browser uploads each
- * object directly to local storage/S3 and then completes it through the
- * existing complete endpoint. This keeps large IFC/DWG files out of the API
- * process memory while still giving callers one request and a result per file.
+ * Reserve a batch, then send each file to its authenticated SDM upload route.
+ * The server stages and transfers bytes to the configured storage provider.
  */
 const MAX_FILES = 100;
 const MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
@@ -88,6 +86,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     if (rawFiles.length === 0) return requestError("INVALID_BATCH", "At least one drawing or BIM model is required");
     if (rawFiles.length > MAX_FILES) return requestError("BATCH_LIMIT", `A batch can contain at most ${MAX_FILES} files`, 413);
 
+    assertStorageConfigured();
     const parsed = rawFiles.map(parseFile);
     const results: Array<Record<string, unknown>> = [];
     const seen = new Set<string>();
@@ -134,21 +133,8 @@ export async function POST(request: Request, context: { params: Promise<{ projec
           [fileId, membership.projectId, storageKey, file.filename, file.mimeType, file.byteSize, user.id],
         );
 
-        let uploadUrl: string;
-        let headers: Record<string, string>;
-        let expiresIn = 900;
-        let storageMode: "filesystem" | "s3";
-        if (isFilesystemStorage()) {
-          uploadUrl = `/api/projects/${encodeURIComponent(projectCode)}/files/${fileId}/upload`;
-          headers = { "content-type": file.mimeType };
-          storageMode = "filesystem";
-        } else {
-          const signed = await createUploadUrl(storageKey, file.mimeType);
-          uploadUrl = signed.url;
-          headers = signed.headers;
-          expiresIn = signed.expiresIn;
-          storageMode = "s3";
-        }
+        const uploadUrl = `/api/projects/${encodeURIComponent(projectCode)}/files/${fileId}/upload`;
+        const headers = { "content-type": file.mimeType };
         results.push({
           index,
           filename: file.filename,
@@ -163,13 +149,13 @@ export async function POST(request: Request, context: { params: Promise<{ projec
           isDrawing: file.isDrawing || kind === "drawing",
           uploadUrl,
           headers,
-          expiresIn,
-          storageMode,
+          storageMode: storageMode(),
+          uploadMode: "server",
           completeUrl: `/api/projects/${encodeURIComponent(projectCode)}/files/complete`,
           attachUrlHint: "After completion, attach fileId to a draft with POST /api/projects/{projectCode}/drafts/{draftId}/files",
         });
       } catch (error) {
-        // The asset is only a reservation until a signed upload is returned.
+        // Remove a failed reservation before a client can start uploading it.
         // Remove an unservable reservation so retries do not leave orphaned
         // file rows behind.
         await db.query("DELETE FROM file_assets WHERE id = $1 AND project_id = $2", [fileId, membership.projectId]).catch(() => undefined);
@@ -189,6 +175,6 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     const status = accepted.length === 0 ? 400 : rejected.length > 0 ? 207 : 201;
     return NextResponse.json({ data: { total: results.length, accepted: accepted.length, rejected: rejected.length, totalBytes, maxFiles: MAX_FILES, maxFileBytes: MAX_FILE_BYTES, maxBatchBytes: MAX_BATCH_BYTES, results } }, { status });
   } catch (error) {
-    return authErrorResponse(error);
+    return storageErrorResponse(error) ?? authErrorResponse(error);
   }
 }

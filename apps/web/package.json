@@ -15,6 +15,7 @@
     "@aws-sdk/client-s3": "^3.864.0",
     "@aws-sdk/s3-request-presigner": "^3.864.0",
     "@xeokit/xeokit-sdk": "^2.6.67",
+    "esdk-obs-nodejs": "3.26.2",
     "exceljs": "^4.4.0",
     "jose": "^6.1.0",
     "lucide-react": "^0.468.0",

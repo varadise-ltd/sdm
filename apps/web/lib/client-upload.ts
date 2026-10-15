@@ -22,10 +22,13 @@ export async function attachUpload(projectCode: string, draftId: string, file: F
     const { data } = await postJson(`${base}/files/presign`, { filename: file.name, mimeType: file.type || "application/octet-stream", byteSize: file.size });
     Object.assign(checkpoint, data);
   }
+  // Derive the target on every retry, including checkpoints from an older UI.
+  checkpoint.uploadUrl = `${base}/files/${encodeURIComponent(checkpoint.fileId!)}/upload`;
   if (!checkpoint.uploaded) {
     await new Promise<void>((resolve, reject) => {
       const request = new XMLHttpRequest();
       request.open("PUT", checkpoint.uploadUrl!);
+      request.withCredentials = true;
       Object.entries(checkpoint.headers ?? {}).forEach(([name, value]) => request.setRequestHeader(name, value));
       request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 88)); };
       request.onload = () => {
@@ -42,13 +45,7 @@ export async function attachUpload(projectCode: string, draftId: string, file: F
   }
   if (!checkpoint.completed) {
     onProgress(90);
-    let sha256Hex: string | undefined;
-    // The server verifies the stored size; avoid allocating multi-GB hash buffers.
-    if (file.size <= 256 * 1024 ** 2 && globalThis.crypto?.subtle) {
-      const hash = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-      sha256Hex = Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    }
-    await postJson(`${base}/files/complete`, { fileId: checkpoint.fileId, sha256Hex });
+    await postJson(`${base}/files/complete`, { fileId: checkpoint.fileId });
     checkpoint.completed = true;
   }
   onProgress(96);

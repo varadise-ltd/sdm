@@ -66,13 +66,14 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     if (!draft.rows[0]) return NextResponse.json({ error: { code: "NOT_FOUND", message: "Draft not found" } }, { status: 404 });
     if (draft.rows[0].status !== "open") return NextResponse.json({ error: { code: "DRAFT_CLOSED", message: "Only open drafts can receive files" } }, { status: 409 });
 
-    const file = await db.query<{ id: string; filename: string; scan: string }>(
-      `SELECT id, original_filename AS filename, virus_scan_status AS scan
+    const file = await db.query<{ id: string; filename: string; scan: string; uploadedAt: string | null }>(
+      `SELECT id, original_filename AS filename, virus_scan_status AS scan, uploaded_at AS "uploadedAt"
        FROM file_assets WHERE id = $1 AND project_id = $2
          AND (created_by_user_id = $3 OR $4::text = 'document_controller')`,
       [fileId, membership.projectId, user.id, membership.roleSlug],
     );
     if (!file.rows[0]) return NextResponse.json({ error: { code: "NOT_FOUND", message: "File upload not found" } }, { status: 404 });
+    if (!file.rows[0].uploadedAt) return NextResponse.json({ error: { code: "UPLOAD_INCOMPLETE", message: "The file must finish uploading before it can be attached" } }, { status: 409 });
     if (["infected", "failed"].includes(file.rows[0].scan)) {
       return NextResponse.json({ error: { code: "FILE_BLOCKED", message: "This file failed the malware scan and cannot be attached" } }, { status: 423 });
     }
