@@ -53,7 +53,8 @@ The database is exposed locally on port `5433` (the container still listens on
 
 The default development storage mode is a filesystem adapter at
 `.local-storage/`, which keeps the stack self-contained. An S3-compatible
-adapter is also implemented. If the local Docker registry permits the MinIO
+adapter and native Huawei OBS adapter are also implemented. Uploads and
+downloads pass through the authenticated SDM server. If the local Docker registry permits the MinIO
 images, start that optional profile with `docker compose --profile storage up
 -d`; otherwise point `S3_ENDPOINT`, `S3_BUCKET`, and the access credentials at a
 managed S3-compatible service for a deployment environment.
@@ -77,6 +78,9 @@ The main lifecycle endpoints are:
 - `POST /api/projects/{projectCode}/transmittals` and `POST /api/projects/{projectCode}/transmittals/{id}/send` create and send controlled packages.
 - `POST /api/projects/{projectCode}/client-decisions` records Client A/C/D decisions and applies the Published or RTC transition rules.
 - `POST /api/projects/{projectCode}/files/presign`, `POST .../files/complete`, and `GET .../files/{fileId}/download` provide the authenticated upload/verification/download flow.
+- `PUT /api/projects/{projectCode}/files/{fileId}/upload` receives the file at
+  SDM, verifies its size and SHA-256, and stores it using server credentials.
+  See [OBS configuration and the upload migration](docs/AUTH_STORAGE.md#object-storage).
 - `GET/POST/PATCH/DELETE /api/projects/{projectCode}/tags` and `GET/POST/DELETE /api/containers/{containerId}/tags` provide governed custom tags.
 - `GET/POST/PATCH/DELETE /api/projects/{projectCode}/connectors` provides project-scoped external-drive configuration. Connector records store provider metadata and secret-manager references only; raw passwords, tokens, and client secrets are rejected and never returned.
 - `GET/PATCH /api/projects/{projectCode}/settings`, plus the parties, users, and
@@ -178,6 +182,9 @@ node scripts/smoke-backend.mjs
 node scripts/smoke-files.mjs
 npm run test:browser
 npm run test:recovery
+npm run test:workflow
+# After an isolated production build (SDM_BUILD_DIR=.next-verify):
+npm run test:obs
 ```
 
 The checks default to `http://localhost:3001`. Set `SDM_BASE_URL` when using
@@ -186,6 +193,15 @@ can select another installed Playwright browser channel. These tests create
 named local test records using small IFC and SVG fixtures. Screenshots and
 results are saved under `artifacts/functional-checks/`, which is excluded from
 Git.
+
+The workflow check covers adding and editing single-letter step keys, length
+limits, invalid input, and duplicate keys. It removes its inactive test template
+after the run.
+
+The OBS check starts the production build against a local OBS protocol fixture
+with no CORS headers. It verifies signed server requests, retry after storage
+failure, private downloads, incomplete-upload guards, and IFC rendering in
+Edge. It uses fixture credentials and does not contact a live OBS bucket.
 
 Docker development uses polling and a separate `.next-docker` directory so
 Windows builds cannot overwrite its running development assets.

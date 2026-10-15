@@ -5,7 +5,7 @@ import { isUuid, parseObjectBody } from "../../../../../../../lib/http";
 
 export const runtime = "nodejs";
 const workflowAdminRoles: readonly SdmRole[] = ["contractor_pm", "document_controller"];
-const keyPattern = /^[a-z][a-z0-9_.-]{1,63}$/;
+const keyPattern = /^[a-z][a-z0-9_.-]{0,63}$/;
 const rolePattern = /^[a-z][a-z0-9_]{1,63}$/;
 const REORDER_OFFSET = 1_000_000;
 

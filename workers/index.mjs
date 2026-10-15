@@ -21,7 +21,7 @@ async function processFileQueue() {
     UPDATE file_assets
        SET virus_scan_status = 'clean',
            text_index_status = CASE WHEN text_index_status = 'pending' THEN 'unsupported' ELSE text_index_status END
-     WHERE virus_scan_status = 'pending'
+     WHERE virus_scan_status = 'pending' AND uploaded_at IS NOT NULL
   `);
 }
 

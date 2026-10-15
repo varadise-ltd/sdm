@@ -6,7 +6,7 @@ import { isUuid, parseObjectBody } from "../../../../../../../../lib/http";
 
 export const runtime = "nodejs";
 const workflowAdminRoles: readonly SdmRole[] = ["contractor_pm", "document_controller"];
-const keyPattern = /^[a-z][a-z0-9_.-]{1,63}$/;
+const keyPattern = /^[a-z][a-z0-9_.-]{0,63}$/;
 const rolePattern = /^[a-z][a-z0-9_]{1,63}$/;
 const REORDER_OFFSET = 1_000_000;
 
@@ -74,7 +74,10 @@ export async function PATCH(request: Request, context: Context) {
     let nextRole = row.requiredRoleSlug;
     if (body.stepKey !== undefined) nextKey = text(body.stepKey, "stepKey", 64).toLowerCase();
     if (body.displayName !== undefined) nextName = text(body.displayName, "displayName", 120);
-    if (!keyPattern.test(nextKey)) throw new Error("stepKey must start with a letter and contain only lowercase letters, numbers, dots, hyphens, or underscores");
+    if (!keyPattern.test(nextKey)) {
+      await client.query("ROLLBACK");
+      return error("stepKey must start with a letter and contain only lowercase letters, numbers, dots, hyphens, or underscores");
+    }
     if (body.required !== undefined) {
       if (typeof body.required !== "boolean") throw new Error("required must be a boolean");
       nextRequired = body.required;

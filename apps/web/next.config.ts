@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  serverExternalPackages: ["esdk-obs-nodejs"],
   distDir: process.env.SDM_BUILD_DIR || (process.env.NODE_ENV === "development" && process.platform === "linux" ? ".next-docker" : ".next"),
   // Prevent the embedded Next.js diagnostics portal from intercepting
   // application clicks during local development.

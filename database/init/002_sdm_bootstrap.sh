@@ -60,3 +60,8 @@ psql -v ON_ERROR_STOP=1 \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \
   --file /opt/sdm/migrations/011_document_library_folders.sql
+
+psql -v ON_ERROR_STOP=1 \
+  --username "$POSTGRES_USER" \
+  --dbname "$POSTGRES_DB" \
+  --file /opt/sdm/migrations/012_server_file_uploads.sql

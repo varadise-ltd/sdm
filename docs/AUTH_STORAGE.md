@@ -44,27 +44,83 @@ whether a project exists to users without membership.
 
 ## Object storage
 
-Files use an S3-compatible bucket. The server creates a random file UUID and
-builds the key as `projects/{projectId}/files/{fileId}/{sanitizedFilename}`.
-Clients receive a short-lived presigned PUT URL from:
+Files use private Huawei OBS, an S3-compatible bucket, or the local filesystem.
+The server creates a random file UUID and builds the key as
+`projects/{projectId}/files/{fileId}/{sanitizedFilename}`.
 
-`POST /api/projects/{projectCode}/files/presign`
+1. `POST /api/projects/{projectCode}/files/presign` reserves a file and returns
+   a relative SDM upload URL. This API name is retained for compatibility; it no
+   longer returns a cloud PUT URL or credentials. Batch reservations behave the
+   same way.
+2. `PUT /api/projects/{projectCode}/files/{fileId}/upload` authenticates the
+   creator, streams the request to temporary server disk, enforces the declared
+   size (up to 5 GB), and computes SHA-256. The server then uploads the staged
+   file using Huawei's official Node.js OBS SDK or the S3 SDK. Cloud object size
+   is verified before the database marks it uploaded. Retries reuse the same
+   reservation, and stored assets cannot be replaced through the upload API.
+3. `POST /api/projects/{projectCode}/files/complete` checks the stored size
+   and, if provided, compares the client checksum with the server checksum.
+   Completion is idempotent. Only stored files can be attached to a draft.
+   Malware and text-index jobs wait for a successful upload.
+4. `GET /api/projects/{projectCode}/files/{fileId}/download` returns a relative
+   content URL, or redirects to it when `redirect=1`. The content route checks
+   membership, document visibility, and a clean scan before streaming bytes
+   from storage. `disposition=inline` is preserved for the BIM viewer. Browsers
+   never need bucket CORS rules, cloud network access, or signed cloud URLs.
 
-After uploading, the client calls:
+### Huawei OBS configuration
 
-`POST /api/projects/{projectCode}/files/complete`
+Set these environment variables on the SDM server and recreate the app:
 
-The API performs a `HeadObject` size check before the asset can be attached to
-a draft or revision. Malware and text-index jobs remain pending until the
-worker completes them. Downloads use a membership-checked short-lived GET
-URL from:
+```dotenv
+S3_STORAGE_MODE=obs
+OBS_ENDPOINT=https://obs.ap-southeast-1.myhuaweicloud.com
+OBS_BUCKET=your-private-bucket
+OBS_ACCESS_KEY_ID=your-server-access-key
+OBS_SECRET_ACCESS_KEY=your-server-secret-key
+# Optional for temporary credentials:
+OBS_SECURITY_TOKEN=
+OBS_TIMEOUT_SECONDS=900
+```
 
-`GET /api/projects/{projectCode}/files/{fileId}/download`
+Use your bucket's actual regional endpoint without a bucket name, object path,
+or query string. `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`,
+`S3_SECRET_ACCESS_KEY`, and `S3_SESSION_TOKEN` remain aliases. Existing
+`S3_ENDPOINT` values ending in `.myhuaweicloud.com` or `.myhuaweicloud.cn`
+automatically select the native OBS adapter unless filesystem mode is explicit.
+OBS HTTPS certificate verification is enabled. Keep credentials in deployment
+secrets, and grant only the needed object read/write/metadata permissions in
+SDM's private prefix.
+
+SDM performs authenticated server operations using the official SDK. Huawei's
+[pre-signed URL reference](https://support.huaweicloud.com/intl/en-us/api-obs/obs_04_0011.html)
+and [Node.js upload reference](https://support.huaweicloud.com/intl/en-us/sdk-nodejs-devg-obs/obs_29_0403.html)
+describe the signing and object APIs; no signed upload URL is given to users.
+
+`SDM_UPLOAD_TEMP_DIR` defaults to the operating system's temporary directory.
+Provision enough disk space for concurrent uploads. Staged files are removed
+on success or failure. Reverse proxies must permit upload bodies up to 5 GB
+and allow enough request time for the browser transfer plus the cloud transfer.
+A process crash may leave temporary files for the deployment's normal temp
+cleanup. No file body is buffered in memory as a whole.
+
+### Upgrade existing databases
+
+Before starting this version of the app and worker, apply
+`database/migrations/012_server_file_uploads.sql`. For the local Docker stack:
+
+```powershell
+docker exec SDM-db psql -U sdm -d sdm -v ON_ERROR_STOP=1 -f /opt/sdm/migrations/012_server_file_uploads.sql
+docker compose up -d --force-recreate app worker
+```
+
+The additive migration preserves existing attached/verified assets and adds an
+upload timestamp. New reservations remain unavailable until the server has
+stored all bytes. Fresh Docker databases run it during bootstrap.
 
 The local `storage` compose profile runs MinIO and creates the `sdm-files`
-bucket. Production should set `S3_ENDPOINT` to the managed S3-compatible
-service, use a dedicated bucket, rotate credentials, and grant the API only
-object-level access to its prefix.
+bucket. Use `S3_STORAGE_MODE=s3` for this adapter. The app's endpoint must be
+reachable from the server (`http://storage:9000` inside the compose network).
 
 ## External drive connectors
 
