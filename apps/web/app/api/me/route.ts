@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { authErrorResponse, getCurrentUser } from "../../../lib/auth";
+import { authErrorResponse, getCurrentUser, hasProjectPermission, projectPermissionKeys } from "../../../lib/auth";
 import { db } from "../../../lib/db";
 
 export const runtime = "nodejs";
@@ -20,6 +20,6 @@ export async function GET(request: Request) {
          FROM organization_memberships om JOIN organizations o ON o.id = om.organization_id
         WHERE om.user_id = $1 AND om.active AND o.status <> 'closed' ORDER BY o.name`, [user.id],
     );
-    return NextResponse.json({ data: { ...user, organizations: organizations.rows, memberships: memberships.rows } });
+    return NextResponse.json({ data: { ...user, organizations: organizations.rows, memberships: memberships.rows.map((membership) => ({ ...membership, permissions: Object.fromEntries(projectPermissionKeys.map((key) => [key, hasProjectPermission(membership, key)])) })) } });
   } catch (error) { return authErrorResponse(error); }
 }

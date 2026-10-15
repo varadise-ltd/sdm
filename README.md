@@ -147,8 +147,10 @@ For a deployment build, configure a real OIDC provider and S3-compatible
 storage first, then run the application with `npm run start` and the worker with
 `npm run worker`. The worker runs a durable heartbeat and the explicit local
 development scan release path. A production deployment must provide an
-antivirus scanner and IFC conversion/OCR adapters behind this worker boundary
-before enabling those file classes. Model conversion and the BIM viewer also
+antivirus scanner and OCR adapters behind this worker boundary before enabling
+production file processing. IFC and XKT files can be previewed directly in the
+browser; other uploaded CAD formats remain downloadable source files. Optional
+model conversion and the BIM viewer also
 require a production renderer licensing arrangement appropriate to the
 deployment model.
 
@@ -165,6 +167,39 @@ than silently starting with the development identity or local file storage.
 See [docs/AUTH_STORAGE.md](docs/AUTH_STORAGE.md) for the identity and object
 storage contract and [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the full
 delivery and acceptance plan.
+
+## Functional checks
+
+With the local application, database, worker, and seeded test accounts running:
+
+```powershell
+npm run lint
+node scripts/smoke-backend.mjs
+node scripts/smoke-files.mjs
+npm run test:browser
+npm run test:recovery
+```
+
+The checks default to `http://localhost:3001`. Set `SDM_BASE_URL` when using
+another local port. Browser tests use installed Microsoft Edge; `SDM_BROWSER`
+can select another installed Playwright browser channel. These tests create
+named local test records using small IFC and SVG fixtures. Screenshots and
+results are saved under `artifacts/functional-checks/`, which is excluded from
+Git.
+
+Docker development uses polling and a separate `.next-docker` directory so
+Windows builds cannot overwrite its running development assets.
+
+The browser suite checks real clicks, file selection, attachment scanning,
+draft editing and submission, folder moves, IFC geometry, drawer controls,
+navigation, batch uploads, filename search, exports, and logout. The recovery
+suite interrupts one attachment request and verifies that retry creates only
+one draft and uploads the file once. It also checks attaching files to an
+existing draft and Client-role restrictions.
+
+`predev` and `prebuild` copy the installed IFC parser's WASM runtime into public
+assets. Models are parsed locally in the browser using the existing xeokit
+renderer and its [WebIFC loader](https://xeokit.github.io/xeokit-sdk/docs/class/src/plugins/WebIFCLoaderPlugin/WebIFCLoaderPlugin.js~WebIFCLoaderPlugin.html).
 
 ## Stop the environment
 

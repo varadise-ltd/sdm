@@ -50,7 +50,7 @@ const rolePermissionDefaults: Record<SdmRole, ProjectPermission[]> = {
   client_re_er: ["documents.read", "documents.approve"],
 };
 
-export function hasProjectPermission(membership: ProjectMembership, permission: ProjectPermission): boolean {
+export function hasProjectPermission(membership: Pick<ProjectMembership, "roleSlug" | "permissions">, permission: ProjectPermission): boolean {
   if (membership.permissions && Object.prototype.hasOwnProperty.call(membership.permissions, permission)) {
     return membership.permissions[permission] === true;
   }

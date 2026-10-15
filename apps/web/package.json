@@ -2,6 +2,9 @@
   "name": "@sdm/web",
   "private": true,
   "scripts": {
+    "prepare:bim": "node ../../scripts/prepare-bim.mjs",
+    "predev": "npm run prepare:bim",
+    "prebuild": "npm run prepare:bim",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -19,7 +22,8 @@
     "pdf-lib": "^1.17.1",
     "pg": "^8.23.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "web-ifc": "0.0.51"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

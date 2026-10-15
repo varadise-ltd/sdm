@@ -1,5 +1,7 @@
 .git
 .next
+.next-*
+artifacts/functional-checks
 node_modules
 .local-storage
 coverage

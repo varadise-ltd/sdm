@@ -1,8 +1,11 @@
 .env
 node_modules/
 .next/
+.next-*/
 *.tsbuildinfo
 dist/
 coverage/
 .local-storage/
+apps/web/public/vendor/web-ifc/
+artifacts/functional-checks/
 .DS_Store

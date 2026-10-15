@@ -6,6 +6,38 @@ export const runtime = "nodejs";
 
 const attachRoles: readonly SdmRole[] = ["contractor_pm", "document_controller", "subcontractor", "supplier", "design_consultant"];
 
+export async function GET(request: Request, context: { params: Promise<{ projectCode: string; draftId: string }> }) {
+  try {
+    const { projectCode, draftId } = await context.params;
+    const { user, membership } = await requireProjectMembership(request, projectCode, attachRoles, "documents.read");
+    if (!/^[0-9a-f-]{36}$/i.test(draftId)) {
+      return NextResponse.json({ error: { code: "NOT_FOUND", message: "Draft not found" } }, { status: 404 });
+    }
+
+    const draft = await db.query<{ id: string }>(
+      `SELECT id FROM drafts
+       WHERE id = $1 AND project_id = $2
+         AND (creator_user_id = $3 OR $4::text = 'document_controller')`,
+      [draftId, membership.projectId, user.id, membership.roleSlug],
+    );
+    if (!draft.rows[0]) return NextResponse.json({ error: { code: "NOT_FOUND", message: "Draft not found" } }, { status: 404 });
+
+    const files = await db.query(
+      `SELECT fa.id, fa.original_filename AS "filename", fa.mime_type AS "mimeType", fa.byte_size AS "byteSize",
+              fa.virus_scan_status AS "virusScanStatus", fa.text_index_status AS "textIndexStatus",
+              'Draft' AS "revisionCode", df.sort_order AS "sortOrder", df.sort_order = 0 AS "isPrimary"
+       FROM draft_files df
+       JOIN file_assets fa ON fa.id = df.file_id AND fa.project_id = $2
+       WHERE df.draft_id = $1
+       ORDER BY df.sort_order, fa.original_filename`,
+      [draftId, membership.projectId],
+    );
+    return NextResponse.json({ data: files.rows, draftId });
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+}
+
 /** Attach a completed upload to an open draft. Infected/failed files are
  * rejected immediately; pending files remain quarantined until the worker
  * releases them. The database keeps the

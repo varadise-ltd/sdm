@@ -46,6 +46,7 @@ export async function GET(request: Request) {
           c.document_number AS "documentNumber",
           c.internal_number AS "internalNumber",
           c.title,
+          c.updated_at AS "updatedAt",
           c.library_folder AS "libraryFolder",
           c.document_type_code AS "documentType",
           c.is_drawing AS "isDrawing",
@@ -83,7 +84,16 @@ export async function GET(request: Request) {
         LEFT JOIN document_revisions AS r ON r.id = c.latest_revision_id
         CROSS JOIN search_query AS sq
         WHERE p.code = $2
-          AND ($1 = '' OR s.search_vector @@ sq.tsquery)
+          AND (
+            $1 = '' OR s.search_vector @@ sq.tsquery
+            OR strpos(lower(concat_ws(' ', c.title, c.container_number, c.document_number, c.internal_number)), lower($1)) > 0
+            OR EXISTS (
+              SELECT 1 FROM revision_files rf
+              JOIN file_assets fa ON fa.id = rf.file_id
+              WHERE rf.revision_id = r.id
+                AND strpos(lower(fa.original_filename), lower($1)) > 0
+            )
+          )
           AND ($3::text IS NULL OR r.cde_state = $3)
           AND (
             cardinality($4::text[]) = 0

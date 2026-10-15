@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { authErrorResponse, getCurrentUser } from "../../../lib/auth";
+import { authErrorResponse, getCurrentUser, hasProjectPermission, projectPermissionKeys } from "../../../lib/auth";
 import { db } from "../../../lib/db";
 import { jsonError, parseObjectBody } from "../../../lib/http";
 
@@ -44,7 +44,7 @@ export async function GET(request: Request) {
     ORDER BY "organizationName", name
   `, [user.id]);
 
-    return NextResponse.json({ data: result.rows });
+    return NextResponse.json({ data: result.rows.map((project) => ({ ...project, permissions: Object.fromEntries(projectPermissionKeys.map((key) => [key, hasProjectPermission(project, key)])) })) });
   } catch (error) {
     return authErrorResponse(error);
   }

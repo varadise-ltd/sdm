@@ -16,7 +16,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     const filename = typeof body.filename === "string" ? sanitizeFilename(body.filename) : "";
     const mimeType = typeof body.mimeType === "string" ? body.mimeType.trim().slice(0, 255) : "";
     const byteSize = typeof body.byteSize === "number" ? body.byteSize : Number(body.byteSize);
-    if (!filename || !mimeType || !Number.isSafeInteger(byteSize) || byteSize < 0 || byteSize > 5368709120) {
+    if (!filename || !mimeType || !Number.isSafeInteger(byteSize) || byteSize <= 0 || byteSize > 5368709120) {
       return NextResponse.json({ error: { code: "INVALID_FILE", message: "filename, mimeType and byteSize are required; files are limited to 5 GB" } }, { status: 400 });
     }
 

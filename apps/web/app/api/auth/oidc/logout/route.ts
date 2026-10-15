@@ -6,17 +6,22 @@ export const runtime = "nodejs";
 
 function clearSessionCookie(): string { return `sdm_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`; }
 
+function returnToLogin() {
+  // Relative redirects retain the browser's public host/port behind Docker.
+  const response = new NextResponse(null, { status: 307, headers: { Location: "/login" } });
+  response.headers.append("Set-Cookie", clearSessionCookie());
+  return response;
+}
+
 export async function GET(request: Request) {
   await revokeSession(request);
   if (authMode !== "oidc") {
-    const response = NextResponse.redirect(new URL("/login", request.url));
-    response.headers.append("Set-Cookie", clearSessionCookie());
-    return response;
+    return returnToLogin();
   }
   const issuer = (process.env.OIDC_ISSUER_URL ?? process.env.KEYCLOAK_ISSUER_URL)?.replace(/\/$/, "");
   const clientId = process.env.OIDC_CLIENT_ID ?? process.env.KEYCLOAK_CLIENT_ID ?? process.env.OIDC_AUDIENCE;
   const postLogout = process.env.SDM_OIDC_POST_LOGOUT_REDIRECT_URI ?? `${new URL(request.url).origin}/login`;
-  if (!issuer || !clientId) return NextResponse.redirect(new URL("/login", request.url));
+  if (!issuer || !clientId) return returnToLogin();
   const endpoint = process.env.OIDC_END_SESSION_ENDPOINT ?? `${issuer}/protocol/openid-connect/logout`;
   const logout = new URL(endpoint);
   logout.searchParams.set("client_id", clientId);

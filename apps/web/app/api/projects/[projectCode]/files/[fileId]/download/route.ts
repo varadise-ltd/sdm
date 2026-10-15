@@ -24,9 +24,11 @@ export async function GET(request: Request, context: { params: Promise<{ project
     const inline = new URL(request.url).searchParams.get("disposition") === "inline";
     if (isFilesystemStorage()) {
       const downloadUrl = `/api/projects/${encodeURIComponent(projectCode)}/files/${fileId}/download/content`;
+      if (new URL(request.url).searchParams.get("redirect") === "1") return new NextResponse(null, { status: 307, headers: { Location: downloadUrl } });
       return NextResponse.json({ data: { downloadUrl, expiresIn: 900, mimeType: file.mimeType, storageMode: "filesystem" } });
     }
     const signed = await createDownloadUrl(file.storageKey, file.originalFilename, inline);
+    if (new URL(request.url).searchParams.get("redirect") === "1") return NextResponse.redirect(signed.url);
     return NextResponse.json({ data: { downloadUrl: signed.url, expiresIn: signed.expiresIn, mimeType: file.mimeType } });
   } catch (error) {
     return authErrorResponse(error);

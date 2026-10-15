@@ -6,6 +6,10 @@
 .bim-runtime-canvas{display:block;width:100%;height:100%}
 .bim-runtime-status{position:absolute;top:10px;left:10px;padding:5px 8px;border-radius:6px;background:rgba(255,255,255,.86);border:1px solid var(--line);font-size:9px;color:var(--muted)}
 .bim-viewer-message{position:relative;z-index:1}
+.bim-runtime-message{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:32px;text-align:center;background:rgba(245,248,252,.88)}
+.bim-runtime-status button{margin-left:12px;padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:white;cursor:pointer}
+.submission-fields{border:0;padding:0;margin:0;min-width:0}
+button:disabled{opacity:.55;cursor:not-allowed}
 /* Next.js development diagnostics must never sit above the product surface. */
 nextjs-portal{display:none!important;pointer-events:none!important}
 
@@ -23,6 +27,8 @@ nextjs-portal{display:none!important;pointer-events:none!important}
 .top-popover span{display:block;color:var(--muted);font-size:11px;line-height:1.45}
 .top-popover button{display:block;width:100%;margin-top:10px;padding:8px;border:1px solid var(--line);border-radius:7px;text-align:left;font-size:11px;font-weight:700}
 .top-popover button:hover{background:#f5f7fa}
+.task-popover-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center}
+.task-popover-row button:last-child{width:auto}
 .profile-popover{width:230px}
 .toast{position:fixed;right:20px;bottom:20px;z-index:100;display:flex;align-items:center;gap:10px;max-width:360px;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;box-shadow:0 12px 32px rgba(15,23,42,.16);font-size:11px;color:var(--ink)}
 .toast button{display:grid;place-items:center;width:22px;height:22px;border-radius:5px;color:var(--muted)}

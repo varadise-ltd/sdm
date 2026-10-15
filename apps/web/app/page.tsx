@@ -52,6 +52,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import AdminPanel from "./components/AdminPanel";
 import BimViewerSurface from "./components/BimViewerSurface";
+import { attachUpload, type UploadCheckpoint } from "../lib/client-upload";
 import PasswordChangeForm from "./components/PasswordChangeForm";
 import WorkflowSetupPanel from "./components/WorkflowSetupPanel";
 import { defaultLibraryFolder, libraryFolderLabel, libraryFolderOptions } from "../lib/library-folders";
@@ -158,12 +159,11 @@ const endorsementLabels: Record<Endorsement["endorsementType"], string> = {
 };
 type RevisionRecord = { id: string; revisionCode: string; revisionSequence: number; suitabilityCode: string; clientResponseCode: string; cdeState: string; workflowStatus: string; submittedAt: string | null; publishedAt: string | null; createdAt: string; updatedAt: string; isCurrent: boolean; supersedesRevisionCode: string | null; submittedBy: string | null; fileCount: number };
 type BatchUploadStatus = "queued" | "uploading" | "complete" | "error";
-type BatchUploadItem = { id: string; file: File; kind: "drawing" | "bim"; status: BatchUploadStatus; progress: number; message?: string; draftId?: string; fileId?: string };
+type BatchUploadItem = { id: string; file: File; kind: "drawing" | "bim"; status: BatchUploadStatus; progress: number; message?: string; draftId?: string; fileId?: string; upload?: UploadCheckpoint };
 
 const MAX_BATCH_FILES = 100;
 const MAX_BATCH_FILE_BYTES = 5 * 1024 * 1024 * 1024;
 const MAX_BATCH_TOTAL_BYTES = 50 * 1024 * 1024 * 1024;
-const BATCH_HASH_LIMIT = 256 * 1024 * 1024;
 const BATCH_FILE_EXTENSIONS: Record<string, BatchUploadItem["kind"]> = {
   ".ifc": "bim", ".ifczip": "bim", ".ifcxml": "bim", ".xkt": "bim", ".rvt": "bim", ".rfa": "bim", ".nwd": "bim", ".nwc": "bim", ".nwf": "bim", ".skp": "bim", ".3dm": "bim", ".obj": "bim", ".fbx": "bim", ".gltf": "bim", ".glb": "bim", ".step": "bim", ".stp": "bim", ".iges": "bim", ".igs": "bim",
   ".dwg": "drawing", ".dxf": "drawing", ".dgn": "drawing", ".plt": "drawing", ".svg": "drawing", ".pdf": "drawing", ".png": "drawing", ".jpg": "drawing", ".jpeg": "drawing", ".tif": "drawing", ".tiff": "drawing",
@@ -184,17 +184,13 @@ function batchFileKind(file: File): BatchUploadItem["kind"] | null {
   return BATCH_FILE_EXTENSIONS[extension] ?? null;
 }
 
-function uploadWithProgress(url: string, headers: Record<string, string> | undefined, file: File, onProgress: (value: number) => void) {
-  return new Promise<void>((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("PUT", url);
-    Object.entries(headers ?? {}).forEach(([name, value]) => request.setRequestHeader(name, value));
-    request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
-    request.onload = () => request.status >= 200 && request.status < 300 ? resolve() : reject(new Error(`Upload failed (${request.status})`));
-    request.onerror = () => reject(new Error("Network error during upload"));
-    request.onabort = () => reject(new Error("Upload was cancelled"));
-    request.send(file);
-  });
+function isXktFile(filename: string) {
+  return filename.toLowerCase().endsWith(".xkt");
+}
+
+function isBimFile(filename: string) {
+  const extension = filename.toLowerCase().slice(filename.lastIndexOf("."));
+  return BATCH_FILE_EXTENSIONS[extension] === "bim";
 }
 
 const emptyContainer: Container = {
@@ -366,6 +362,20 @@ export default function Page() {
   const [tagLoading, setTagLoading] = useState(false);
   const [newTagName, setNewTagName] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<ContainerFile[]>([]);
+  const [selectedFilesReload, setSelectedFilesReload] = useState(0);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState("");
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftError, setDraftError] = useState("");
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const draftSaveRef = useRef<{ busy: boolean; draftId?: string; upload: UploadCheckpoint }>({ busy: false, upload: {} });
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [exporting, setExporting] = useState<"xlsx" | "pdf" | null>(null);
+  const [searchError, setSearchError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const batchInputRef = useRef<HTMLInputElement>(null);
   const [batchFiles, setBatchFiles] = useState<BatchUploadItem[]>([]);
@@ -375,8 +385,18 @@ export default function Page() {
   const [batchDiscipline, setBatchDiscipline] = useState("");
   const [batchInternalCategory, setBatchInternalCategory] = useState("");
   const activeProject = projects.find((project) => project.code === projectCode);
+  const activeMembership = sessionProfile?.memberships.find((membership) => membership.projectCode === projectCode);
+  const permissions = activeProject?.permissions ?? activeMembership?.permissions;
+  const canCreate = permissions?.["documents.create"] === true;
+  const canEdit = permissions?.["documents.edit"] === true;
+  const canSubmit = permissions?.["documents.submit"] === true;
+  const isClient = (activeProject?.roleSlug ?? activeMembership?.roleSlug) === "client_re_er";
 
-  const selected = selectedId ? items.find((item) => item.id === selectedId) ?? emptyContainer : emptyContainer;
+  const selected = selectedId ? (searchItems ?? []).find((item) => item.id === selectedId) ?? items.find((item) => item.id === selectedId) ?? emptyContainer : emptyContainer;
+  const canDecide = isClient && permissions?.["documents.approve"] === true && Boolean(selected.transmittalItemId);
+  const bimFile = selectedFiles.find((file) => file.virusScanStatus === "clean" && isXktFile(file.filename))
+    ?? selectedFiles.find((file) => file.virusScanStatus === "clean" && file.filename.toLowerCase().endsWith(".ifc"));
+  const bimScanPending = selectedFiles.some((file) => file.virusScanStatus === "pending" && (isXktFile(file.filename) || file.filename.toLowerCase().endsWith(".ifc")));
 
   function redirectToLoginIfUnauthenticated(response: Response): boolean {
     if (response.status === 401) {
@@ -488,26 +508,54 @@ export default function Page() {
   }, [selected.dbId, projectCode]);
 
   useEffect(() => {
-    if (!selected.dbId) { setSelectedFiles([]); return; }
+    setSelectedFiles([]);
+    setFilesError("");
+    if (!selected.dbId && !selected.draftId) { setFilesLoading(false); return; }
+    setFilesLoading(true);
     let cancelled = false;
-    void fetch(`/api/containers/${selected.dbId}/files`, { credentials: "include", cache: "no-store" })
-      .then(async (response) => response.ok ? (await response.json() as { data?: ContainerFile[] }).data ?? [] : [])
-      .then((files) => { if (!cancelled) setSelectedFiles(files); })
-      .catch(() => { if (!cancelled) setSelectedFiles([]); });
-    return () => { cancelled = true; };
-  }, [selected.dbId]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const filesUrl = selected.dbId
+      ? `/api/containers/${selected.dbId}/files${selected.revisionId ? `?revisionId=${selected.revisionId}` : ""}`
+      : `/api/projects/${encodeURIComponent(projectCode)}/drafts/${selected.draftId}/files`;
+    async function refreshFiles() {
+      try {
+        const response = await fetch(filesUrl, { credentials: "include", cache: "no-store" });
+        const payload = await response.json() as { data?: ContainerFile[]; error?: { message?: string } };
+        if (!response.ok) throw new Error(payload.error?.message ?? "Attachments could not be loaded");
+        if (cancelled) return;
+        const files = payload.data ?? [];
+        setSelectedFiles(files);
+        setFilesError("");
+        if (files.some((file) => file.virusScanStatus === "pending")) timer = setTimeout(() => void refreshFiles(), 3000);
+      } catch (error) {
+        if (!cancelled) setFilesError(error instanceof Error ? error.message : "Attachments could not be loaded");
+      } finally { if (!cancelled) setFilesLoading(false); }
+    }
+    void refreshFiles();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [selected.dbId, selected.draftId, selected.revisionId, projectCode, selectedFilesReload]);
 
-  async function downloadFile(file: ContainerFile) {
+  async function attachToSelectedDraft(file: File) {
+    if (!selected.draftId || attachmentUploading) return;
+    setAttachmentUploading(true);
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/files/${file.id}/download?disposition=inline`, { credentials: "include" });
-      const payload = (await response.json()) as { data?: { downloadUrl: string }; error?: { message?: string } };
-      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "File download is unavailable");
-      window.open(payload.data.downloadUrl, "_blank", "noopener,noreferrer");
-    } catch (error) { notify(error instanceof Error ? error.message : "File download is unavailable"); }
+      await attachUpload(projectCode, selected.draftId, file, {}, () => undefined);
+      setSelectedFilesReload((value) => value + 1);
+      notify(`Attached ${file.name}; scanning is in progress`);
+    } catch (error) { notify(error instanceof Error ? error.message : "File could not be attached"); }
+    finally { setAttachmentUploading(false); }
+  }
+
+  function downloadFile(file: ContainerFile) {
+    // Open during the click event, before asynchronous permission checks can
+    // expire browser activation. The endpoint authorizes and redirects.
+    window.open(`/api/projects/${encodeURIComponent(projectCode)}/files/${file.id}/download?redirect=1`, "_blank", "noopener,noreferrer");
   }
   useEffect(() => {
     const value = query.trim();
-    if (!value) { setSearchItems(null); return; }
+    setSearchItems(null);
+    setSearchError("");
+    if (!value) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void fetch(`/api/search?project=${encodeURIComponent(projectCode)}&q=${encodeURIComponent(value)}`, { credentials: "include", cache: "no-store", signal: controller.signal })
@@ -516,18 +564,19 @@ export default function Page() {
           const payload = (await response.json()) as { data?: ApiContainer[] };
           setSearchItems((payload.data ?? []).map(mapApiContainer));
         })
-        .catch((error) => { if (error instanceof DOMException && error.name === "AbortError") return; setSearchItems([]); });
+        .catch((error) => { if (controller.signal.aborted) return; setSearchError(error instanceof Error ? error.message : "Search is unavailable"); });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [query, projectCode]);
 
   const filtered = useMemo(() => {
-    const source = searchItems ?? items;
+    const value = query.trim().toLowerCase();
+    const localMatches = (item: Container) => `${item.id} ${item.title} ${item.type} ${item.originator} ${item.suitability}`.toLowerCase().includes(value);
+    const source = searchItems ? [...items.filter((item) => item.draftId && localMatches(item)), ...searchItems] : items;
     const baseMatches = (item: Container) => {
     const matchesCde = selectedCde === "All" || item.state === selectedCde;
     const matchesType = typeFilter === "All" || item.type === typeFilter;
-    const haystack = `${item.id} ${item.title} ${item.type} ${item.originator} ${item.suitability}`.toLowerCase();
-    return matchesCde && matchesType && haystack.includes(query.toLowerCase());
+    return matchesCde && matchesType && (searchItems !== null || localMatches(item));
     };
     return source.filter((item) => baseMatches(item) && matchesLibraryFolder(item, libraryFolder));
   }, [items, searchItems, query, selectedCde, typeFilter, libraryFolder]);
@@ -561,7 +610,12 @@ export default function Page() {
   }
 
   function selectContainer(id: string) {
-    const target = items.find((item) => item.id === id || item.dbId === id || item.revisionId === id);
+    const target = [...(searchItems ?? []), ...items].find((item) => item.id === id || item.dbId === id || item.revisionId === id);
+    if (!target) { notify("This record is no longer available in the current project"); return; }
+    setTasksOpen(false); setNotificationsOpen(false);
+    if (target && !filtered.some((item) => item.id === target.id)) {
+      setQuery(""); setSearchItems(null); setSelectedCde("All"); setTypeFilter("All"); setLibraryFolder("All documents");
+    }
     setSelectedId(target?.id ?? id);
     setTab("Overview");
     setDrawerOpen(true);
@@ -582,7 +636,14 @@ export default function Page() {
     setDraftLibraryFolder(option?.type === type ? option.value : defaultLibraryFolder(type));
     setDraftTitle("");
     setDraftDiscipline("");
+    setSelectedFile(null); setSelectedFileName(""); setDraftError(""); setUploadProgress(0);
+    draftSaveRef.current = { busy: false, upload: {} };
     setModal("new");
+  }
+
+  function chooseDraftFile(file: File) {
+    setSelectedFile(file); setSelectedFileName(file.name); setDraftError("");
+    draftSaveRef.current.upload = {};
   }
 
   async function moveSelectedDocument() {
@@ -597,7 +658,7 @@ export default function Page() {
       const payload = (await response.json()) as { error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "Document could not be moved");
       const nextItems = await loadContainers();
-      const moved = nextItems.find((item) => item.dbId === selected.dbId || item.draftId === selected.draftId);
+      const moved = nextItems.find((item) => (selected.dbId && item.dbId === selected.dbId) || (selected.draftId && item.draftId === selected.draftId));
       if (moved) setSelectedId(moved.id);
       const selectedLabel = libraryFolderOptions.find((item) => item.value === moveLibraryFolder)?.label ?? moveLibraryFolder;
       setLibraryFolder(selectedLabel as LibraryFolder);
@@ -651,26 +712,41 @@ export default function Page() {
     finally { setTagLoading(false); }
   }
 
-  function exportRegister(format: "xlsx" | "pdf" = "xlsx") {
+  async function exportRegister(format: "xlsx" | "pdf" = "xlsx") {
+    if (exporting) return;
+    setExporting(format);
     const params = new URLSearchParams();
     if (query.trim()) params.set("q", query.trim());
     if (selectedCde !== "All") params.set("cdeState", selectedCde);
     if (typeFilter !== "All") params.set("type", typeFilter);
     const href = `/api/projects/${encodeURIComponent(projectCode)}/exports/${format}?${params.toString()}`;
-    const anchor = document.createElement("a");
-    anchor.href = href;
-    anchor.download = `sdm-document-register-${projectCode}.${format}`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    notify(`Downloading ${format.toUpperCase()} register export`);
+    try {
+      const response = await fetch(href, { credentials: "include", cache: "no-store" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "Register export could not be generated");
+      }
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `sdm-document-register-${projectCode}.${format}`;
+      document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+      notify(`Downloaded ${format.toUpperCase()} register export`);
+    } catch (error) { notify(error instanceof Error ? error.message : "Register export could not be generated"); }
+    finally { setExporting(null); }
   }
 
   async function createDraft() {
+    if (draftSaveRef.current.busy) return;
+    if (selectedFile && (!selectedFile.size || selectedFile.size > MAX_BATCH_FILE_BYTES)) { setDraftError("Choose a non-empty file no larger than 5 GB"); return; }
+    draftSaveRef.current.busy = true;
+    setDraftSaving(true); setDraftError(""); setUploadProgress(0);
     const title = draftTitle.trim() || "New SDM document draft";
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/drafts`, {
-        method: "POST",
+      const existingDraftId = draftSaveRef.current.draftId;
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/drafts${existingDraftId ? `/${existingDraftId}` : ""}`, {
+        method: existingDraftId ? "PATCH" : "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -687,36 +763,10 @@ export default function Page() {
       if (!response.ok) throw new Error(payload.error?.message ?? "Draft could not be saved");
       const draftId = payload.data?.id;
       if (!draftId) throw new Error("Draft was saved without an identifier");
+      draftSaveRef.current.draftId = draftId;
 
       if (selectedFile) {
-        const presignResponse = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/files/presign`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filename: selectedFile.name, mimeType: selectedFile.type || "application/octet-stream", byteSize: selectedFile.size }),
-        });
-        const presign = (await presignResponse.json()) as { data?: { fileId: string; uploadUrl: string; headers?: Record<string, string> }; error?: { message?: string } };
-        if (!presignResponse.ok || !presign.data) throw new Error(presign.error?.message ?? "File upload could not be prepared");
-        const uploadResponse = await fetch(presign.data.uploadUrl, { method: "PUT", headers: presign.data.headers, body: selectedFile });
-        if (!uploadResponse.ok) throw new Error("File upload failed");
-        const digest = await crypto.subtle.digest("SHA-256", await selectedFile.arrayBuffer());
-        const sha256Hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-        const completeResponse = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/files/complete`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileId: presign.data.fileId, sha256Hex }),
-        });
-        const completed = (await completeResponse.json()) as { error?: { message?: string } };
-        if (!completeResponse.ok) throw new Error(completed.error?.message ?? "File upload could not be verified");
-        const attachResponse = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/drafts/${draftId}/files`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileId: presign.data.fileId }),
-        });
-        const attached = (await attachResponse.json()) as { error?: { message?: string } };
-        if (!attachResponse.ok) throw new Error(attached.error?.message ?? "File could not be attached to the draft");
+        await attachUpload(projectCode, draftId, selectedFile, draftSaveRef.current.upload, setUploadProgress);
       }
       setDraftTitle("");
       setSelectedFileName("");
@@ -724,11 +774,17 @@ export default function Page() {
       setDraftType("Document");
       setDraftCdeState("WIP");
       setDraftInternalCategory("");
+      const nextItems = await loadContainers();
+      const createdDraft = nextItems.find((item) => item.draftId === draftId);
+      setQuery(""); setSearchItems(null); setSelectedCde("All"); setTypeFilter("All"); setLibraryFolder("All documents");
+      if (createdDraft) setSelectedId(createdDraft.id);
+      setSelectedFilesReload((value) => value + 1);
       setModal(null);
       notify(`Draft ${draftId} saved${selectedFile ? " with an attached file" : ""} — no ISO document number allocated`);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Draft could not be saved");
-    }
+      const message = error instanceof Error ? error.message : "Draft could not be saved";
+      setDraftError(`${message}${draftSaveRef.current.draftId ? ". Your draft is saved; retry to finish attaching the file." : ""}`);
+    } finally { draftSaveRef.current.busy = false; setDraftSaving(false); }
   }
 
   function updateBatchFile(id: string, patch: Partial<BatchUploadItem>) {
@@ -775,32 +831,9 @@ export default function Page() {
         updateBatchFile(item.id, { draftId, progress: 8, message: "Preparing file storage…" });
       }
 
-      const presignResponse = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/files/presign`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: item.file.name, mimeType: item.file.type || "application/octet-stream", byteSize: item.file.size }),
-      });
-      const presign = (await presignResponse.json()) as { data?: { fileId: string; uploadUrl: string; headers?: Record<string, string> }; error?: { message?: string } };
-      if (!presignResponse.ok || !presign.data) throw new Error(presign.error?.message ?? "File upload could not be prepared");
-      const fileId = presign.data.fileId;
-      updateBatchFile(item.id, { fileId, progress: 10, message: item.draftId ? "Retrying secure upload…" : "Uploading securely…" });
-      const uploadUrl = presign.data.uploadUrl;
-      const uploadHeaders = presign.data.headers;
-      await uploadWithProgress(uploadUrl, uploadHeaders, item.file, (value) => updateBatchFile(item.id, { progress: 10 + Math.round(value * 0.78), message: `Uploading securely… ${value}%` }));
-
-      const completeBody: { fileId: string; sha256Hex?: string } = { fileId };
-      if (item.file.size <= BATCH_HASH_LIMIT) {
-        const digest = await crypto.subtle.digest("SHA-256", await item.file.arrayBuffer());
-        completeBody.sha256Hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-      }
-      const completeResponse = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/files/complete`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(completeBody) });
-      const completePayload = (await completeResponse.json()) as { error?: { message?: string } };
-      if (!completeResponse.ok) throw new Error(completePayload.error?.message ?? "File upload could not be verified");
-      updateBatchFile(item.id, { progress: 92, message: "Attaching to draft…" });
-      const attachResponse = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/drafts/${draftId}/files`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId }) });
-      const attachPayload = (await attachResponse.json()) as { error?: { message?: string } };
-      if (!attachResponse.ok) throw new Error(attachPayload.error?.message ?? "File could not be attached to the draft");
+      const upload = item.upload ?? {};
+      updateBatchFile(item.id, { upload });
+      await attachUpload(projectCode, draftId, item.file, upload, (progress) => updateBatchFile(item.id, { progress, message: progress >= 96 ? "Attaching to draft…" : `Uploading securely… ${progress}%` }));
       updateBatchFile(item.id, { status: "complete", progress: 100, message: "Uploaded and attached" });
       return true;
     } catch (error) {
@@ -827,10 +860,13 @@ export default function Page() {
     const completed = (await Promise.all(Array.from({ length: Math.min(3, pending.length) }, () => worker()))).reduce((total, count) => total + count, 0);
     setBatchUploading(false);
     await loadContainers();
+    setSelectedFilesReload((value) => value + 1);
     notify(`Batch upload finished — ${completed} completed, ${pending.length - completed} needing attention`);
   }
 
   async function submitSelected() {
+    if (submitting) return;
+    setSubmitting(true);
     try {
       if (selected.draftId) {
         const response = await fetch(`/api/projects/${encodeURIComponent(projectCode)}/drafts/${selected.draftId}/submit`, { method: "POST", credentials: "include" });
@@ -857,7 +893,7 @@ export default function Page() {
       addAudit(`Transmittal ${created.data.transmittalNumber} sent for ${selected.id}`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "Submission failed");
-    }
+    } finally { setSubmitting(false); }
   }
 
   async function applyDecision(decision: "A" | "C" | "D") {
@@ -880,15 +916,18 @@ export default function Page() {
   }
 
   async function saveMetadata() {
-    if (!selected.dbId || !editTitle.trim()) return;
+    if ((!selected.dbId && !selected.draftId) || !editTitle.trim() || editSaving) return;
+    setEditSaving(true); setEditError("");
     try {
-      const response = await fetch(`/api/containers/${selected.dbId}`, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: editTitle.trim() }) });
+      const endpoint = selected.draftId ? `/api/projects/${encodeURIComponent(projectCode)}/drafts/${selected.draftId}` : `/api/containers/${selected.dbId}`;
+      const response = await fetch(endpoint, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: editTitle.trim() }) });
       const payload = (await response.json()) as { error?: { message?: string } };
       if (!response.ok) throw new Error(payload.error?.message ?? "Metadata could not be saved");
       await loadContainers();
       setModal(null);
       notify(`Metadata saved for ${selected.id}`);
-    } catch (error) { notify(error instanceof Error ? error.message : "Metadata could not be saved"); }
+    } catch (error) { setEditError(error instanceof Error ? error.message : "Metadata could not be saved"); }
+    finally { setEditSaving(false); }
   }
 
   function openRail(label: string) {
@@ -902,6 +941,9 @@ export default function Page() {
     setNotificationsOpen(false);
     setTasksOpen(false);
     setProfileOpen(false);
+    if (["Repository", "Home", "Register", "Reviews", "Workflows"].includes(label)) {
+      setLibraryFolder("All documents"); setTypeFilter("All"); setQuery(""); setSearchItems(null);
+    }
     if (label === "Repository") {
       setView("board"); setTab("Overview"); setSelectedCde("All");
     } else if (label === "Home") {
@@ -997,6 +1039,7 @@ export default function Page() {
   }
 
   function selectProject(code: string) {
+    setItems([]); setSearchItems(null); setLibraryFolder("All documents"); setTypeFilter("All"); setModal(null);
     setProjectCode(code);
     setProjectOpen(false);
     setView("board"); setSelectedCde("All"); setQuery(""); setSelectedId("");
@@ -1043,21 +1086,22 @@ export default function Page() {
           <div className="global-search"><Search size={16} /><input aria-label="Search SDM" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search documents, packages, document numbers..." /><kbd>⌘ K</kbd></div>
           <div className="top-actions">
             <button className="icon-button" title="Notifications" aria-expanded={notificationsOpen} onClick={() => { setNotificationsOpen((open) => !open); setTasksOpen(false); setProfileOpen(false); setProjectOpen(false); }}><Bell size={17} />{alertCount > 0 && <i>{alertCount}</i>}</button>
-            <button className="task-button" onClick={() => { setTasksOpen((open) => !open); setNotificationsOpen(false); setProfileOpen(false); setProjectOpen(false); setView("register"); setSelectedCde("Shared"); setQuery(""); }} aria-expanded={tasksOpen}><ClipboardCheck size={16} /> My Tasks <b>{taskCount}</b></button>
+            <button className="task-button" onClick={() => { setTasksOpen((open) => !open); setNotificationsOpen(false); setProfileOpen(false); setProjectOpen(false); }} aria-expanded={tasksOpen}><ClipboardCheck size={16} /> My Tasks <b>{taskCount}</b></button>
             <button className="avatar" onClick={openProfileMenu} aria-label="Open user menu" aria-expanded={profileOpen}>{(sessionProfile?.displayName ?? "SDM").split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</button>
             <button className="icon-button" title="Open user menu" onClick={openProfileMenu} aria-label="Open user menu" aria-expanded={profileOpen}><ChevronDown size={14} /></button>
-            {notificationsOpen && <div className="top-popover"><strong>Notifications</strong>{alerts.length === 0 ? <span>No notifications.</span> : alerts.slice(0, 5).map((alert) => <button key={alert.id} className={alert.readAt ? "notification-read" : ""} onClick={() => { void markAlertRead(alert); if (alert.targetType === "container") selectContainer(alert.targetId); }}><span>{alert.message}</span><small>{formatUpdated(alert.createdAt)}</small></button>)}<button onClick={() => { setNotificationsOpen(false); setView("register"); setSelectedCde("Shared"); }}>Review Shared items <ArrowRight size={13} /></button></div>}
-            {tasksOpen && <div className="top-popover"><strong>My Tasks</strong>{tasks.length === 0 ? <span>No open tasks.</span> : tasks.filter((task) => task.status !== "completed").slice(0, 5).map((task) => <button key={task.id} onClick={() => { if (task.targetType === "container" || task.targetType === "revision") selectContainer(task.containerNumber ?? task.targetId); }}><span>{task.targetTitle ?? task.taskType}</span><small>{task.status} {task.dueAt ? `· due ${formatUpdated(task.dueAt)}` : ""}</small><em onClick={(event) => { event.stopPropagation(); void updateTask(task, "completed"); }}>Complete</em></button>)}<button onClick={() => { setTasksOpen(false); setView("register"); setSelectedCde("Shared"); }}>Show review queue <ArrowRight size={13} /></button></div>}
+            {notificationsOpen && <div className="top-popover"><strong>Notifications</strong>{alerts.length === 0 ? <span>No notifications.</span> : alerts.slice(0, 5).map((alert) => <button key={alert.id} className={alert.readAt ? "notification-read" : ""} onClick={() => { void markAlertRead(alert); if (alert.targetType === "container") selectContainer(alert.targetId); }}><span>{alert.message}</span><small>{formatUpdated(alert.createdAt)}</small></button>)}<button onClick={() => { setNotificationsOpen(false); openRail("Reviews"); }}>Review Shared items <ArrowRight size={13} /></button></div>}
+            {tasksOpen && <div className="top-popover"><strong>My Tasks</strong>{tasks.length === 0 ? <span>No open tasks.</span> : tasks.filter((task) => task.status !== "completed").slice(0, 5).map((task) => <div key={task.id} className="task-popover-row"><button onClick={() => { if (task.targetType === "container" || task.targetType === "revision") selectContainer(task.containerNumber ?? task.targetId); else notify("This task has no linked document"); }}><span>{task.targetTitle ?? task.taskType}</span><small>{task.status} {task.dueAt ? "· due " + formatUpdated(task.dueAt) : ""}</small></button><button aria-label={"Complete " + (task.targetTitle ?? task.taskType)} onClick={() => void updateTask(task, "completed")}>Complete</button></div>)}<button onClick={() => { setTasksOpen(false); openRail("Reviews"); }}>Show review queue <ArrowRight size={13} /></button></div>}
             {profileOpen && <div className="top-popover profile-popover"><strong>{sessionProfile?.displayName ?? "SDM user"}</strong><span>{sessionProfile?.email ?? "Signed-in account"}</span><button onClick={() => { setProfileOpen(false); setModal("profile"); }}>Profile settings</button><button onClick={() => { window.location.assign("/api/auth/oidc/logout"); }}>Sign out</button></div>}
           </div>
         </header>
 
         <div className="workspace-head">
           <div><div className="eyebrow"><Folder size={12} /> Repository / {projectCode}</div><h1>Smart Document Management</h1><p>Controlled information for the project delivery phase.</p></div>
-          <div className="head-actions"><button className="button secondary" onClick={() => setView(view === "board" ? "register" : "board")}><Columns3 size={16} /> {view === "board" ? "Register view" : "CDE board"}</button><button className="button secondary" onClick={() => { setBatchFiles([]); setBatchCdeState("WIP"); setBatchDiscipline(""); setBatchInternalCategory(""); setBatchLibraryFolder(libraryFolderOptions.find((item) => item.value === folderPathForLabel(libraryFolder) && item.type === "Drawing")?.value ?? "Drawings"); setModal("batchUpload"); }}><UploadCloud size={16} /> Batch upload</button><button className="button primary" onClick={openNewSubmission}><Plus size={16} /> New submission <ChevronDown size={14} /></button></div>
+          <div className="head-actions"><button className="button secondary" onClick={() => setView(view === "board" ? "register" : "board")}><Columns3 size={16} /> {view === "board" ? "Register view" : "CDE board"}</button><button className="button secondary" disabled={!canCreate} title={!canCreate ? "Your project role cannot create documents" : undefined} onClick={() => { setBatchFiles([]); setBatchCdeState("WIP"); setBatchDiscipline(""); setBatchInternalCategory(""); setBatchLibraryFolder(libraryFolderOptions.find((item) => item.value === folderPathForLabel(libraryFolder) && item.type === "Drawing")?.value ?? "Drawings"); setModal("batchUpload"); }}><UploadCloud size={16} /> Batch upload</button><button className="button primary" disabled={!canCreate} title={!canCreate ? "Your project role cannot create documents" : undefined} onClick={openNewSubmission}><Plus size={16} /> New submission <ChevronDown size={14} /></button></div>
         </div>
 
         <div className="cde-tabs"><div className="eyebrow">COMMON DATA ENVIRONMENT (CDE)</div><div className="tab-group">{["All", "WIP", "Shared", "Published", "Archive"].map((value) => <button key={value} className={selectedCde === value ? "selected" : ""} onClick={() => { setSelectedCde(value as "All" | CdeState); notify(`${value} CDE filter selected`); }}>{value}{value !== "All" && <span>{items.filter((item) => item.state === value).length}</span>}</button>)}</div><div className="filter-wrap"><button className="filter-button" onClick={() => setFilterOpen((open) => !open)} aria-expanded={filterOpen}><SlidersHorizontal size={16} /> Filter{typeFilter !== "All" && <span className="filter-count">1</span>}</button>{filterOpen && <div className="filter-popover"><strong>Filter register</strong><label>Document type<select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as "All" | Container["type"])}><option>All</option><option>Drawing</option><option>Document</option><option>Form</option><option>Package</option><option>Transmittal</option></select></label><button onClick={() => { setTypeFilter("All"); setFilterOpen(false); notify("Register filters cleared"); }}>Clear filters</button></div>}</div></div>
+        {searchError && <div className="data-state error" role="alert">{searchError}</div>}
         {loading && <div className="data-state" role="status">Loading the live document register…</div>}
         {loadError && <div className="data-state error" role="alert"><span>{loadError}</span><button className="button secondary" onClick={() => void loadContainers()}>Retry</button></div>}
 
@@ -1066,29 +1110,30 @@ export default function Page() {
             {libraryCollapsed ? <button className="library-expand" onClick={() => setLibraryCollapsed(false)} title="Expand library"><ChevronRight size={18} /><span>Library</span></button> : <><div className="library-title"><strong>Library</strong><button className="icon-button" onClick={() => setLibraryCollapsed(true)} title="Collapse library"><ChevronLeft size={16} /></button></div><div className="library-search"><Search size={14} /><input placeholder="Search library" value={query} onChange={(event) => setQuery(event.target.value)} /></div><button className={`tree-root ${libraryFolder === "All documents" ? "selected" : ""}`} onClick={() => { setQuery(""); setTypeFilter("All"); setSelectedCde("All"); setLibraryFolder("All documents"); addAudit("All documents selected"); }}><FolderOpen size={15} /> All documents <CountBadge value={libraryCounts["All documents"]} /></button><TreeSection label="Documents" icon={FileText} selectedFolder={libraryFolder} counts={libraryCounts} items={["Project Information", "Design", "Construction", "Commercial", "Handover"]} onSelect={(label) => { setQuery(""); setTypeFilter("All"); setSelectedCde("All"); setLibraryFolder(label as LibraryFolder); addAudit(`${label} library folder selected`); }} /><TreeSection label="Drawings" icon={FileCheck2} selectedFolder={libraryFolder} counts={libraryCounts} items={["Architectural", "Structural", "MEP", "Civil"]} onSelect={(label) => { setQuery(""); setTypeFilter("All"); setSelectedCde("All"); setLibraryFolder(label as LibraryFolder); addAudit(`${label} library folder selected`); }} /><TreeSection label="Forms" icon={ClipboardList} selectedFolder={libraryFolder} counts={libraryCounts} onSelect={(label) => { setQuery(""); setTypeFilter("All"); setSelectedCde("All"); setLibraryFolder(label as LibraryFolder); addAudit(`${label} library folder selected`); }} /><TreeSection label="Internal Shared" icon={Users} selectedFolder={libraryFolder} counts={libraryCounts} onSelect={(label) => { setQuery(""); setTypeFilter("All"); setSelectedCde("All"); setLibraryFolder(label as LibraryFolder); addAudit(`${label} library folder selected`); }} /><TreeSection label="Packages" icon={Box} selectedFolder={libraryFolder} counts={libraryCounts} items={["Incoming", "Outgoing", "Transmittals", "Archived"]} onSelect={(label) => { setQuery(""); setSelectedCde("All"); setTypeFilter("All"); setLibraryFolder(label as LibraryFolder); addAudit(`${label} library folder selected`); }} /><div className="library-footer"><div><Clock3 size={14} /> Recent</div>{recentItems.length === 0 ? <span className="tag-empty">No recent documents</span> : recentItems.map((item) => <button key={`recent-${item.dbId ?? item.id}`} onClick={() => setQuery(item.id)}>{item.id} · {item.updated}</button>)}</div></>}
           </aside>
 
-          {view === "board" ? <div className="board-area">{filtered.length === 0 && <div className="data-state"><strong>{libraryFolder}</strong><span>No documents found in this folder.</span></div>}{lanes.map((lane) => { const LaneIcon = lane.icon; const laneItems = filtered.filter((item) => item.state === lane.id); return <section className={`lane lane-${lane.tone}`} key={lane.id}><div className="lane-head"><div className="lane-name"><LaneIcon size={17} /><div><strong>{lane.id}</strong><span>{lane.caption}</span></div></div><b>{laneItems.length}</b></div><div className="lane-list">{laneItems.map((item) => <button key={item.id} className={`container-row ${selected.id === item.id ? "selected" : ""}`} onClick={() => selectContainer(item.id)} onDoubleClick={() => { selectContainer(item.id); setDrawerExpanded(true); }}><div className="row-top"><span className="container-id">{item.id}</span><MoreHorizontal size={15} /></div><strong>{item.title}</strong><div className="row-tags"><Badge tone={badgeTone(item.rev)}>{item.rev}</Badge><Badge tone={badgeTone(item.suitability)}>{item.suitability}</Badge><Badge tone={badgeTone(item.response)}>{item.response}</Badge></div><div className="row-meta"><span><IconForType type={item.type} /> {item.type}</span><span>{item.updated}</span><i>{item.assignee}</i></div></button>)}</div><button className="lane-add" onClick={openNewSubmission}><Plus size={15} /> Add to {lane.id}</button></section>; })}</div> : <RegisterView folder={libraryFolder} items={filtered} selectedId={selected.id} onSelect={selectContainer} onOpenMaximized={() => setDrawerExpanded(true)} onExportExcel={() => exportRegister("xlsx")} onDownloadPdf={() => exportRegister("pdf")} />}
+          {view === "board" ? <div className="board-area">{filtered.length === 0 && <div className="data-state"><strong>{libraryFolder}</strong><span>No documents found in this folder.</span></div>}{lanes.map((lane) => { const LaneIcon = lane.icon; const laneItems = filtered.filter((item) => item.state === lane.id); return <section className={`lane lane-${lane.tone}`} key={lane.id}><div className="lane-head"><div className="lane-name"><LaneIcon size={17} /><div><strong>{lane.id}</strong><span>{lane.caption}</span></div></div><b>{laneItems.length}</b></div><div className="lane-list">{laneItems.map((item) => <button key={item.id} className={`container-row ${selected.id === item.id ? "selected" : ""}`} onClick={() => selectContainer(item.id)} onDoubleClick={() => { selectContainer(item.id); setDrawerExpanded(true); }}><div className="row-top"><span className="container-id">{item.id}</span><MoreHorizontal size={15} /></div><strong>{item.title}</strong><div className="row-tags"><Badge tone={badgeTone(item.rev)}>{item.rev}</Badge><Badge tone={badgeTone(item.suitability)}>{item.suitability}</Badge><Badge tone={badgeTone(item.response)}>{item.response}</Badge></div><div className="row-meta"><span><IconForType type={item.type} /> {item.type}</span><span>{item.updated}</span><i>{item.assignee}</i></div></button>)}</div><button className="lane-add" onClick={openNewSubmission}><Plus size={15} /> Add to {lane.id}</button></section>; })}</div> : <RegisterView exporting={exporting} folder={libraryFolder} items={filtered} selectedId={selected.id} onSelect={selectContainer} onOpenMaximized={() => setDrawerExpanded(true)} onExportExcel={() => exportRegister("xlsx")} onDownloadPdf={() => exportRegister("pdf")} />}
 
           {!drawerOpen && <button className="drawer-reopen" onClick={() => setDrawerOpen(true)}><ChevronLeft size={15} /> Open details</button>}
           {drawerOpen && <aside className={`detail-drawer ${drawerExpanded ? "drawer-expanded" : ""}`} onDoubleClick={(event) => { if (event.target instanceof Element && event.target.closest("button,a,input,select,textarea")) return; setDrawerExpanded((expanded) => !expanded); }} title={drawerExpanded ? "Double-click to restore the details panel" : "Double-click to enlarge the details panel"}>
             <div className="detail-head"><div className="detail-icon"><IconForType type={selected.type} /></div><div><div className="container-id">{selected.id}</div><strong>{selected.title}</strong><span>{selected.type} · Rev {selected.rev}</span></div><button className="icon-button" onClick={(event) => { event.stopPropagation(); setDrawerExpanded((expanded) => !expanded); }} onDoubleClick={(event) => event.stopPropagation()} title={drawerExpanded ? "Restore details panel" : "Enlarge details panel"} aria-label={drawerExpanded ? "Restore details panel" : "Enlarge details panel"} aria-pressed={drawerExpanded}>{drawerExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button><button className="icon-button" onClick={(event) => { event.stopPropagation(); setDrawerOpen(false); notify("Details drawer closed"); }} onDoubleClick={(event) => event.stopPropagation()} title="Close details" aria-label="Close details"><X size={17} /></button></div>
             <div className="detail-tabs">{(["Overview", "Workflow", "Revisions", "Links", "Activity"] as Tab[]).map((item) => <button key={item} className={tab === item ? "selected" : ""} onClick={() => setTab(item)}>{item}</button>)}</div>
-            {tab === "Overview" && <Overview selected={selected} onBim={() => setModal("bim")} onDecision={() => setModal("decision")} onEdit={() => { setEditTitle(selected.title); setModal("edit"); }} onMove={() => { setMoveLibraryFolder(selected.libraryFolder ?? defaultLibraryFolder(selected.type, selected.type === "Drawing")); setMoveError(""); setModal("move"); }} onEndorsements={() => void openEndorsements()} onLinks={() => openLinkedRecords("all")} onForms={() => openLinkedRecords("form")} onPhotos={() => openLinkedRecords("photo")} files={selectedFiles} onDownloadFile={(file) => void downloadFile(file)} tags={assignedTags} availableTags={availableTags} tagMenuOpen={tagMenuOpen} tagLoading={tagLoading} newTagName={newTagName} onNewTagName={setNewTagName} onCreateTag={() => void createTag()} onToggleTag={(tag) => void toggleTag(tag)} onToggleTagMenu={() => setTagMenuOpen((open) => !open)} />}
-            {tab === "Workflow" && <WorkflowPanel projectCode={projectCode} revisionId={selected.revisionId} onComplete={(message) => addAudit(`${message} · ${selected.id}`)} />}
-            {tab === "Revisions" && <RevisionPanel selected={selected} projectCode={projectCode} />}
+            {tab === "Overview" && <Overview selected={selected} canEdit={canEdit} canDecide={canDecide} onBim={() => setModal("bim")} onDecision={() => setModal("decision")} onEdit={() => { setEditTitle(selected.title); setEditError(""); setModal("edit"); }} onMove={() => { setMoveLibraryFolder(selected.libraryFolder ?? defaultLibraryFolder(selected.type, selected.type === "Drawing")); setMoveError(""); setModal("move"); }} onEndorsements={() => void openEndorsements()} onLinks={() => openLinkedRecords("all")} onForms={() => openLinkedRecords("form")} onPhotos={() => openLinkedRecords("photo")} files={selectedFiles} filesLoading={filesLoading} filesError={filesError} onRetryFiles={() => setSelectedFilesReload((value) => value + 1)} onAttachFile={() => attachmentInputRef.current?.click()} attachmentUploading={attachmentUploading} onDownloadFile={(file) => void downloadFile(file)} tags={assignedTags} availableTags={availableTags} tagMenuOpen={tagMenuOpen} tagLoading={tagLoading} newTagName={newTagName} onNewTagName={setNewTagName} onCreateTag={() => void createTag()} onToggleTag={(tag) => void toggleTag(tag)} onToggleTagMenu={() => setTagMenuOpen((open) => !open)} />}
+            {tab === "Workflow" && <WorkflowPanel key={projectCode + selected.revisionId} projectCode={projectCode} revisionId={selected.revisionId} onComplete={(message) => addAudit(`${message} · ${selected.id}`)} />}
+            {tab === "Revisions" && <RevisionPanel key={projectCode + selected.dbId} selected={selected} projectCode={projectCode} />}
             {tab === "Links" && <LinksPanel onBim={() => setModal("bim")} onLinks={() => openLinkedRecords("all")} onForms={() => openLinkedRecords("form")} onPhotos={() => openLinkedRecords("photo")} />}
-            {tab === "Activity" && <ActivityPanel audit={audit} entityId={selected.dbId} projectCode={projectCode} />}
-            <div className="drawer-actions"><button className="button secondary" onClick={() => { setRequestComment(""); setModal("requestChanges"); }}><MessageIcon /> Request changes</button><button className="button primary" onClick={() => selected.draftId || selected.response === "Pending" ? void submitSelected() : setModal("decision")}><Send size={15} /> {selected.draftId ? "Submit draft" : selected.response === "Pending" ? "Submit for transmittal" : "Client decision"}<ArrowRight size={14} /></button></div>
+            {tab === "Activity" && <ActivityPanel key={projectCode + selected.dbId} audit={audit} entityId={selected.dbId} projectCode={projectCode} />}
+            <div className="drawer-actions"><button className="button secondary" disabled={!selected.dbId} title={!selected.dbId ? "Submit the draft before requesting changes" : undefined} onClick={() => { setRequestComment(""); setModal("requestChanges"); }}><MessageIcon /> Request changes</button><button className="button primary" disabled={submitting || !selected.id || (isClient ? !canDecide : !canSubmit || (!selected.draftId && selected.response !== "Pending"))} title={isClient && !canDecide ? "A sent transmittal is required" : !isClient && !canSubmit ? "Your project role cannot submit documents" : undefined} onClick={() => isClient ? setModal("decision") : void submitSelected()}><Send size={15} /> {submitting ? "Submitting…" : selected.draftId ? "Submit draft" : isClient ? "Client decision" : "Submit for transmittal"}<ArrowRight size={14} /></button></div>
           </aside>}
         </div>
       </section>
 
       {modal === "batchUpload" && <Modal wide title="Batch upload drawings and BIM models" onClose={() => { if (!batchUploading) setModal(null); }}><p className="modal-copy">Upload up to {MAX_BATCH_FILES} drawings or model files at once. Each file is stored privately, malware scanned, and attached to its own WIP draft for review before ISO numbering.</p><div className={`batch-dropzone ${batchDropActive ? "active" : ""}`} role="button" tabIndex={0} aria-label="Choose drawings or BIM models to upload" onClick={() => batchInputRef.current?.click()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); batchInputRef.current?.click(); } }} onDragOver={(event) => { event.preventDefault(); setBatchDropActive(true); }} onDragLeave={() => setBatchDropActive(false)} onDrop={(event) => { event.preventDefault(); setBatchDropActive(false); addBatchFiles(event.dataTransfer.files); }}><UploadCloud size={24} /><strong>Drop drawings or BIM models here</strong><span>or choose files · IFC, IFCZIP, XKT, RVT, DWG, DXF, DGN, PDF and common image formats · max 5 GB each</span><input ref={batchInputRef} type="file" hidden multiple accept={Object.keys(BATCH_FILE_EXTENSIONS).join(",")} onChange={(event) => { if (event.target.files) addBatchFiles(event.target.files); event.currentTarget.value = ""; }} /></div><div className="form-grid"><label className="field-label">Library folder<select value={batchLibraryFolder} disabled={batchUploading} onChange={(event) => setBatchLibraryFolder(event.target.value)}>{libraryFolderOptions.filter((option) => option.type === "Drawing").map((option) => <option key={option.value} value={option.value}>{option.parent ? `${option.parent} / ${option.label}` : option.label}</option>)}</select></label><label className="field-label">Discipline<input value={batchDiscipline} disabled={batchUploading} onChange={(event) => setBatchDiscipline(event.target.value.toUpperCase())} placeholder="e.g. STR or ARC" /></label><label className="field-label">CDE state<select value={batchCdeState} disabled={batchUploading} onChange={(event) => setBatchCdeState(event.target.value as typeof batchCdeState)}><option>WIP</option><option>Internal</option></select></label>{batchCdeState === "Internal" && <label className="field-label">Internal category<input value={batchInternalCategory} disabled={batchUploading} onChange={(event) => setBatchInternalCategory(event.target.value)} placeholder="e.g. Design coordination" /></label>}</div>{batchFiles.length > 0 ? <div className="batch-file-list" aria-live="polite"><div className="batch-list-head"><strong>{batchFiles.length} selected</strong><button className="button small" disabled={batchUploading} onClick={() => setBatchFiles([])}>Clear</button></div>{batchFiles.map((item) => <div className={`batch-file-row batch-${item.status}`} key={item.id}><div className="batch-file-icon">{item.kind === "bim" ? <Box size={16} /> : <FileCheck2 size={16} />}</div><div className="batch-file-main"><strong title={item.file.name}>{item.file.name}</strong><span>{formatFileSize(item.file.size)} · {item.kind === "bim" ? "BIM model" : "Drawing"}{item.message ? ` · ${item.message}` : ""}</span><div className="batch-progress" role="progressbar" aria-label={`Upload progress for ${item.file.name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.progress}><i style={{ width: `${item.progress}%` }} /></div></div><div className="batch-file-status">{item.status === "complete" ? <CheckCircle2 size={16} /> : item.status === "error" ? <span role="img" aria-label="Upload failed">!</span> : item.status === "uploading" ? <span>{item.progress}%</span> : <Clock3 size={15} />}</div><button className="icon-button" title={`Remove ${item.file.name}`} aria-label={`Remove ${item.file.name}`} disabled={batchUploading || item.status === "uploading"} onClick={() => setBatchFiles((current) => current.filter((entry) => entry.id !== item.id))}><X size={14} /></button></div>)}</div> : <div className="batch-empty">No files selected yet.</div>}<div className="modal-actions"><button className="button secondary" disabled={batchUploading} onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={batchUploading || batchFiles.length === 0 || batchFiles.every((item) => item.status === "complete")} onClick={() => void startBatchUpload()}><UploadCloud size={15} /> {batchUploading ? "Uploading…" : `Upload ${batchFiles.filter((item) => item.status !== "complete").length || "files"}`}</button></div></Modal>}
-      {modal === "new" && <Modal title="New SDM submission" onClose={() => setModal(null)}><p className="modal-copy">Create a private draft first. No ISO document number is allocated until you submit.</p><label className="field-label">Document title<input autoFocus value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder="e.g. Site Logistics Plan" /></label><div className="form-grid"><label className="field-label">Library folder<select value={draftLibraryFolder} onChange={(event) => setDraftLibraryFolder(event.target.value)}>{libraryFolderOptions.filter((option) => option.type === (draftType === "Drawing" ? "Drawing" : draftType === "Form" ? "Form" : "Document")).map((option) => <option key={option.value} value={option.value}>{option.parent ? `${option.parent} / ${option.label}` : option.label}</option>)}</select></label><label className="field-label">Type<select value={draftType} onChange={(event) => { const nextType = event.target.value as typeof draftType; setDraftType(nextType); setDraftLibraryFolder(defaultLibraryFolder(nextType === "Drawing" ? "DR" : nextType === "Form" ? "FM" : "DC", nextType === "Drawing")); }}><option>Document</option><option>Drawing</option><option>Form</option></select></label><label className="field-label">Discipline<input value={draftDiscipline} onChange={(event) => setDraftDiscipline(event.target.value.toUpperCase())} placeholder="e.g. STR or ARC" /></label><label className="field-label">CDE state<select value={draftCdeState} onChange={(event) => setDraftCdeState(event.target.value as typeof draftCdeState)}><option>WIP</option><option>Internal</option></select></label></div>{draftCdeState === "Internal" && <label className="field-label">Internal category<input value={draftInternalCategory} onChange={(event) => setDraftInternalCategory(event.target.value)} placeholder="e.g. Design coordination" /></label>}<button className="upload-box" type="button" onClick={() => fileInputRef.current?.click()}><UploadCloud size={18} /><strong>{selectedFileName || "Drop a file or choose from your computer"}</strong><span>PDF, Office, IFC, DWG, or image · scanned and attached after saving</span><input ref={fileInputRef} type="file" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) { setSelectedFile(file); setSelectedFileName(file.name); notify(`Selected ${file.name}; save the draft to upload and scan it`); } }} /></button><div className="modal-actions"><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" onClick={createDraft}><SaveIcon /> Save draft</button></div></Modal>}
-      {modal === "bim" && <Modal wide title={`BIM viewer · model revision ${selected.rev}`} onClose={() => setModal(null)}><div className="bim-modal-head"><div><Badge tone="info">BIM viewer</Badge><strong>Stage 1 IFC Package</strong><span>IFC / optimized model source · {selected.rev} · permission checked · {bimCameraMode === "orbit" ? "Orbit camera" : "First person camera"}{bimShowEdges ? " · edges on" : " · edges off"}</span></div><div className="bim-tools"><button className="icon-button" title="Reload model" onClick={() => { setBimReload((value) => value + 1); addAudit(`Reloaded BIM viewer for ${selected.id}`); }}><RefreshCw size={15} /></button><button className="icon-button" title="Viewer settings" onClick={() => setModal("bimSettings")}><SlidersHorizontal size={15} /></button></div></div><div className="bim-viewer-placeholder"><BimViewerSurface key={`${selected.dbId ?? selected.id}-${bimReload}-${bimCameraMode}-${bimShowEdges}`} fileId={selectedFiles.find((file) => file.filename.toLowerCase().endsWith(".xkt") || file.mimeType.includes("xkt"))?.id} projectCode={projectCode} cameraMode={bimCameraMode} showEdges={bimShowEdges} /><div className="bim-viewer-message"><Box size={30} /><strong>BIM renderer surface</strong><span>{selectedFiles.some((file) => file.filename.toLowerCase().endsWith(".xkt") || file.mimeType.includes("xkt")) ? "Authorized model asset found; loading the selected revision." : "Renderer initialized. Attach an authorized IFC or optimized model asset to render the 3D scene."}</span><button className="button primary" onClick={() => { setBimReload((value) => value + 1); addAudit(`Loaded model revision ${selected.id}`); }}><Box size={15} /> Load model revision</button></div></div><div className="bim-footer"><span><ShieldCheck size={14} /> Access inherited from package permissions</span><span><History size={14} /> Viewer opens the selected revision only</span><span><Link2 size={14} /> {selectedFiles.length} revision file{selectedFiles.length === 1 ? "" : "s"}</span></div></Modal>}
+      <input ref={attachmentInputRef} type="file" hidden aria-label="Attach file to draft" onChange={(event) => { if (event.target.files?.[0]) void attachToSelectedDraft(event.target.files[0]); event.target.value = ""; }} />
+      {modal === "new" && <Modal title="New SDM submission" onClose={() => { if (!draftSaving) setModal(null); }}><p className="modal-copy">Create a private draft first. No ISO document number is allocated until you submit.</p><fieldset className="submission-fields" disabled={draftSaving}><label className="field-label">Document title<input autoFocus value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder="e.g. Site Logistics Plan" /></label><div className="form-grid"><label className="field-label">Library folder<select value={draftLibraryFolder} onChange={(event) => setDraftLibraryFolder(event.target.value)}>{libraryFolderOptions.filter((option) => option.type === (draftType === "Drawing" ? "Drawing" : draftType === "Form" ? "Form" : "Document")).map((option) => <option key={option.value} value={option.value}>{option.parent ? `${option.parent} / ${option.label}` : option.label}</option>)}</select></label><label className="field-label">Type<select disabled={Boolean(draftSaveRef.current.draftId)} value={draftType} onChange={(event) => { const nextType = event.target.value as typeof draftType; setDraftType(nextType); setDraftLibraryFolder(defaultLibraryFolder(nextType === "Drawing" ? "DR" : nextType === "Form" ? "FM" : "DC", nextType === "Drawing")); }}><option>Document</option><option>Drawing</option><option>Form</option></select></label><label className="field-label">Discipline<input disabled={Boolean(draftSaveRef.current.draftId)} value={draftDiscipline} onChange={(event) => setDraftDiscipline(event.target.value.toUpperCase())} placeholder="e.g. STR or ARC" /></label><label className="field-label">CDE state<select disabled={Boolean(draftSaveRef.current.draftId)} value={draftCdeState} onChange={(event) => setDraftCdeState(event.target.value as typeof draftCdeState)}><option>WIP</option><option>Internal</option></select></label></div>{draftCdeState === "Internal" && <label className="field-label">Internal category<input disabled={Boolean(draftSaveRef.current.draftId)} value={draftInternalCategory} onChange={(event) => setDraftInternalCategory(event.target.value)} placeholder="e.g. Design coordination" /></label>}<button className="upload-box" type="button" onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (event.dataTransfer.files[0]) chooseDraftFile(event.dataTransfer.files[0]); }}><UploadCloud size={18} /><strong>{selectedFileName || "Drop a file or choose from your computer"}</strong><span>PDF, Office, IFC, DWG, or image · scanned and attached after saving</span></button><input ref={fileInputRef} type="file" hidden aria-label="Submission file" onChange={(event) => { if (event.target.files?.[0]) chooseDraftFile(event.target.files[0]); event.target.value = ""; }} /></fieldset>{draftSaving && <p role="status">Saving draft and attachment… {uploadProgress}%</p>}{draftError && <div className="data-state error" role="alert">{draftError}</div>}<div className="modal-actions"><button className="button secondary" disabled={draftSaving} onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={draftSaving} onClick={() => void createDraft()}><SaveIcon /> {draftSaving ? "Saving…" : draftSaveRef.current.draftId ? "Retry save" : "Save draft"}</button></div></Modal>}
+      {modal === "bim" && <Modal wide title={`BIM viewer · model revision ${selected.rev}`} onClose={() => setModal(null)}><div className="bim-modal-head"><div><Badge tone="info">BIM viewer</Badge><strong>{selected.title}</strong><span>IFC / optimized model source · {selected.rev} · permission checked · {bimCameraMode === "orbit" ? "Orbit camera" : "First person camera"}{bimShowEdges ? " · edges on" : " · edges off"}</span></div><div className="bim-tools"><button className="icon-button" title="Reload model" onClick={() => { setBimReload((value) => value + 1); addAudit(`Reloaded BIM viewer for ${selected.id}`); }}><RefreshCw size={15} /></button><button className="icon-button" title="Viewer settings" onClick={() => setModal("bimSettings")}><SlidersHorizontal size={15} /></button></div></div><div className="bim-viewer-placeholder"><BimViewerSurface key={bimReload} fileId={bimFile?.id} format={bimFile && isXktFile(bimFile.filename) ? "xkt" : "ifc"} projectCode={projectCode} cameraMode={bimCameraMode} showEdges={bimShowEdges} emptyMessage={filesLoading ? "Loading attachments…" : filesError || (bimScanPending ? "File scan is in progress; the model will open when it completes." : selectedFiles.some((file) => isBimFile(file.filename)) ? "Attach an IFC or XKT file to preview this model format." : "No IFC or XKT file is attached to this revision.")} /></div><div className="bim-footer"><span><ShieldCheck size={14} /> Access inherited from package permissions</span><span><History size={14} /> Viewer opens the selected revision only</span><span><Link2 size={14} /> {selectedFiles.length} revision file{selectedFiles.length === 1 ? "" : "s"}</span></div></Modal>}
       {modal === "bimSettings" && <Modal title="BIM viewer settings" onClose={() => setModal("bim")}><p className="modal-copy">These settings apply to this viewer session and are kept separate from project administration policies.</p><label className="field-label">Camera mode<select value={bimCameraMode} onChange={(event) => setBimCameraMode(event.target.value as typeof bimCameraMode)}><option value="orbit">Orbit</option><option value="firstPerson">First person</option></select></label><label className="field-label"><span><input type="checkbox" checked={bimShowEdges} onChange={(event) => setBimShowEdges(event.target.checked)} /> Show model edges</span></label><div className="modal-actions"><button className="button secondary" onClick={() => setModal("bim")}>Cancel</button><button className="button primary" onClick={() => { setBimReload((value) => value + 1); addAudit(`BIM viewer settings applied for ${selected.id}`); setModal("bim"); }}>Apply</button></div></Modal>}
       {modal === "decision" && <Modal title="Record Client response" onClose={() => setModal(null)}><div className="decision-target"><IconForType type={selected.type} /><div><strong>{selected.id}</strong><span>{selected.title} · current suitability {selected.suitability}</span></div></div><p className="modal-copy">A changes suitability to Published when drawing endorsement rules pass. C or D keeps S3 and opens the RTC path.</p><div className="decision-grid"><button className="decision decision-a" onClick={() => applyDecision("A")}><span>A</span><strong>Accept</strong><small>Publish when eligible</small></button><button className="decision decision-c" onClick={() => applyDecision("C")}><span>C</span><strong>Revise & resubmit</strong><small>RTC + next P-revision</small></button><button className="decision decision-d" onClick={() => applyDecision("D")}><span>D</span><strong>Not accepted</strong><small>RTC + comments</small></button></div></Modal>}
       {modal === "move" && <Modal title={`Move ${selected.title}`} onClose={() => { if (!moving) setModal(null); }}><p className="modal-copy">Choose the controlled library folder for this {selected.type.toLowerCase()}. The move is audited and does not change its CDE state.</p><label className="field-label">Destination folder<select value={moveLibraryFolder} disabled={moving} onChange={(event) => { setMoveLibraryFolder(event.target.value); setMoveError(""); }}>{libraryFolderOptions.filter((option) => option.type === (selected.type === "Drawing" ? "Drawing" : selected.type === "Form" ? "Form" : selected.type === "Package" ? "Package" : selected.type === "Transmittal" ? "Transmittal" : "Document")).map((option) => <option key={option.value} value={option.value}>{option.parent ? `${option.parent} / ${option.label}` : option.label}</option>)}</select></label>{moveError && <div className="data-state error" role="alert">{moveError}</div>}<div className="modal-actions"><button className="button secondary" disabled={moving} onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={moving || !moveLibraryFolder} onClick={() => void moveSelectedDocument()}><FolderOpen size={15} /> {moving ? "Moving…" : "Move document"}</button></div></Modal>}
-      {modal === "edit" && <Modal title="Edit document details" onClose={() => setModal(null)}><p className="modal-copy">Document numbers, revision codes, suitability, and client responses are controlled fields and cannot be edited here.</p><label className="field-label">Title<input autoFocus value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /></label><div className="modal-actions"><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" onClick={() => void saveMetadata()}>Save changes</button></div></Modal>}
+      {modal === "edit" && <Modal title="Edit document details" onClose={() => { if (!editSaving) setModal(null); }}><p className="modal-copy">Document numbers, revision codes, suitability, and client responses are controlled fields and cannot be edited here.</p><label className="field-label">Title<input autoFocus disabled={editSaving} value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /></label>{editError && <div className="data-state error" role="alert">{editError}</div>}<div className="modal-actions"><button className="button secondary" disabled={editSaving} onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={editSaving || !editTitle.trim()} onClick={() => void saveMetadata()}>{editSaving ? "Saving…" : "Save changes"}</button></div></Modal>}
       {modal === "endorsements" && <Modal title={`Drawing endorsements · ${selected.id}`} onClose={() => setModal(null)}><p className="modal-copy">Endorsements are recorded against the submitted revision and remain in the immutable project audit trail. A recorded endorsement can be withdrawn by the original endorser or a document controller.</p><div className="endorsement-list">{(["IDC", "ICE", "Client"] as const).map((type) => { const item = endorsements.find((endorsement) => endorsement.endorsementType === type); const recorded = item?.status === "endorsed"; const withdrawn = item?.status === "withdrawn"; const canWithdraw = item?.canWithdraw !== false; return <div className="endorsement-row" key={type}><div><strong>{endorsementLabels[type]}</strong><span>{recorded ? `Endorsed by ${item?.endorsedBy ?? "project member"} · ${item?.endorsedAt ? formatUpdated(item.endorsedAt) : ""}` : withdrawn ? "Withdrawn; a new endorsement may be recorded." : "Pending endorsement"}</span></div>{recorded ? <button className="button secondary" disabled={endorsementLoading || !canWithdraw} onClick={() => void withdrawEndorsement(type)}>{canWithdraw ? "Withdraw endorsement" : "Recorded"}</button> : <button className="button secondary" disabled={endorsementLoading} onClick={() => void recordEndorsement(type)}>Record endorsement</button>}</div>; })}</div></Modal>}
       {modal === "links" && <Modal title={`${linkedRecordKind === "all" ? "Linked records" : linkedRecordKind === "form" ? "Form records" : "Photo records"} · ${selected.id}`} onClose={() => setModal(null)}><p className="modal-copy">These references are scoped to the selected revision. Open a linked record directly from the list below.</p><LinkedRecordsPanel projectCode={projectCode} containerId={selected.dbId} revisionId={selected.revisionId} kind={linkedRecordKind} onOpenDocument={(id) => { setModal(null); selectContainer(id); }} /></Modal>}
       {modal === "profile" && <Modal title="Profile settings" onClose={() => setModal(null)}><p className="modal-copy">Your local SDM account is authenticated by the configured identity provider. Profile changes are administered centrally.</p><dl className="meta-grid"><dt>Name</dt><dd>{sessionProfile?.displayName ?? "—"}</dd><dt>Email</dt><dd>{sessionProfile?.email ?? "—"}</dd><dt>Project role</dt><dd>{sessionProfile?.memberships.find((item) => item.projectCode === projectCode)?.roleSlug.replaceAll("_", " ") ?? "—"}</dd><dt>Party</dt><dd>{sessionProfile?.memberships.find((item) => item.projectCode === projectCode)?.partyName ?? "—"}</dd></dl><PasswordChangeForm onNotify={notify} /><div className="modal-actions"><button className="button primary" onClick={() => setModal(null)}>Done</button></div></Modal>}
@@ -1111,13 +1156,13 @@ function TreeSection({ label, icon: Icon, items = [], selectedFolder, counts, on
   return <div className="tree-section"><button className={`tree-root ${selectedFolder === label ? "selected" : ""}`} onClick={() => onSelect?.(label)}><ChevronDown size={13} /><Icon size={15} /> {label} <CountBadge value={counts[label as LibraryFolder]} /></button>{items.map((item) => <button className={`tree-child ${selectedFolder === item ? "selected" : ""}`} key={item} onClick={() => onSelect?.(item)}><Folder size={13} /> {item} <CountBadge value={counts[item as LibraryFolder]} /></button>)}</div>;
 }
 
-function RegisterView({ folder, items, selectedId, onSelect, onOpenMaximized, onExportExcel, onDownloadPdf }: { folder: LibraryFolder; items: Container[]; selectedId: string; onSelect: (id: string) => void; onOpenMaximized?: () => void; onExportExcel: () => void; onDownloadPdf: () => void }) {
+function RegisterView({ exporting, folder, items, selectedId, onSelect, onOpenMaximized, onExportExcel, onDownloadPdf }: { exporting: "xlsx" | "pdf" | null; folder: LibraryFolder; items: Container[]; selectedId: string; onSelect: (id: string) => void; onOpenMaximized?: () => void; onExportExcel: () => void; onDownloadPdf: () => void }) {
   const isFilteredFolder = folder !== "All documents";
-  return <div className="register-area"><div className="register-head"><div><strong>{isFilteredFolder ? `${folder} folder` : "Document Register"}</strong><span>{items.length > 0 ? `${items.length} visible documents` : `No documents found in ${folder}`}</span></div><div className="register-tools"><button className="button secondary" onClick={onExportExcel}><FileArchive size={15} /> Export Excel</button><button className="button secondary" onClick={onDownloadPdf}><FileText size={15} /> Download PDF</button></div></div>{items.length === 0 ? <div className="data-state"><strong>{folder}</strong><span>No documents found in this folder.</span></div> : <div className="register-table"><div className="register-tr register-th"><span>Document number</span><span>Title</span><span>Type</span><span>Rev</span><span>Suitability</span><span>Client response</span><span>CDE</span><span>Updated</span></div>{items.map((item) => <button className={`register-tr ${item.id === selectedId ? "selected" : ""}`} key={item.id} onClick={() => onSelect(item.id)} onDoubleClick={() => { onSelect(item.id); onOpenMaximized?.(); }}><span className="container-id">{item.id}</span><strong>{item.title}</strong><span><IconForType type={item.type} /> {item.type}</span><span>{item.rev}</span><span><Badge tone={badgeTone(item.suitability)}>{item.suitability}</Badge></span><span><Badge tone={badgeTone(item.response)}>{item.response}</Badge></span><span><Badge tone={badgeTone(item.state)}>{item.state}</Badge></span><span>{item.updated}</span></button>)}</div>}</div>;
+  return <div className="register-area"><div className="register-head"><div><strong>{isFilteredFolder ? `${folder} folder` : "Document Register"}</strong><span>{items.length > 0 ? `${items.length} visible documents` : `No documents found in ${folder}`}</span></div><div className="register-tools"><button className="button secondary" disabled={Boolean(exporting)} onClick={onExportExcel}><FileArchive size={15} /> {exporting === "xlsx" ? "Preparing Excel…" : "Export Excel"}</button><button className="button secondary" disabled={Boolean(exporting)} onClick={onDownloadPdf}><FileText size={15} /> {exporting === "pdf" ? "Preparing PDF…" : "Download PDF"}</button></div></div>{items.length === 0 ? <div className="data-state"><strong>{folder}</strong><span>No documents found in this folder.</span></div> : <div className="register-table"><div className="register-tr register-th"><span>Document number</span><span>Title</span><span>Type</span><span>Rev</span><span>Suitability</span><span>Client response</span><span>CDE</span><span>Updated</span></div>{items.map((item) => <button className={`register-tr ${item.id === selectedId ? "selected" : ""}`} key={item.id} onClick={() => onSelect(item.id)} onDoubleClick={() => { onSelect(item.id); onOpenMaximized?.(); }}><span className="container-id">{item.id}</span><strong>{item.title}</strong><span><IconForType type={item.type} /> {item.type}</span><span>{item.rev}</span><span><Badge tone={badgeTone(item.suitability)}>{item.suitability}</Badge></span><span><Badge tone={badgeTone(item.response)}>{item.response}</Badge></span><span><Badge tone={badgeTone(item.state)}>{item.state}</Badge></span><span>{item.updated}</span></button>)}</div>}</div>;
 }
 
-function Overview({ selected, onBim, onDecision, onEdit, onMove, onEndorsements, onLinks, onForms, onPhotos, files, onDownloadFile, tags, availableTags, tagMenuOpen, tagLoading, newTagName, onNewTagName, onCreateTag, onToggleTag, onToggleTagMenu }: { selected: Container; onBim: () => void; onDecision: () => void; onEdit: () => void; onMove: () => void; onEndorsements: () => void; onLinks: () => void; onForms: () => void; onPhotos: () => void; files: ContainerFile[]; onDownloadFile: (file: ContainerFile) => void; tags: ProjectTag[]; availableTags: ProjectTag[]; tagMenuOpen: boolean; tagLoading: boolean; newTagName: string; onNewTagName: (value: string) => void; onCreateTag: () => void; onToggleTag: (tag: ProjectTag) => void; onToggleTagMenu: () => void }) {
-  return <div className="drawer-content"><div className="bim-card"><div className="bim-thumb"><Box size={26} /><span>IFC / model</span></div><div className="bim-card-copy"><strong>BIM model revision {selected.rev}</strong><span>Model source · BIM viewer</span><button onClick={onBim}>Open BIM viewer <ArrowRight size={13} /></button></div></div><div className="detail-section"><div className="section-heading">Key information <span className="section-actions"><button onClick={onMove} disabled={!selected.dbId && !selected.draftId}><FolderOpen size={13} /> Move</button><button onClick={onEdit}><PenLine size={13} /> Edit</button></span></div><dl className="meta-grid"><dt>Document number</dt><dd>{selected.id}</dd><dt>Title</dt><dd>{selected.title}</dd><dt>Type</dt><dd>{selected.type}</dd><dt>Revision</dt><dd>{selected.rev}</dd><dt>Library folder</dt><dd>{selected.libraryFolder ? libraryFolderLabel(selected.libraryFolder) : "Not assigned"}</dd><dt>Suitability</dt><dd><Badge tone={badgeTone(selected.suitability)}>{selected.suitability} — For review and comment</Badge></dd><dt>Client response</dt><dd><Badge tone={badgeTone(selected.response)}>{selected.response}</Badge></dd><dt>Originator</dt><dd>{selected.originator}</dd><dt>Updated</dt><dd>{selected.updated}</dd></dl></div><div className="detail-section"><div className="section-heading">Files <span>{files.length}</span></div>{files.length === 0 ? <span className="tag-empty">No revision files attached</span> : <div className="file-list">{files.map((file) => <button key={`${file.id}-${file.revisionCode}`} onClick={() => onDownloadFile(file)} disabled={file.virusScanStatus !== "clean"}><FileText size={14} /><span><strong>{file.filename}</strong><small>{file.revisionCode} · {file.virusScanStatus === "clean" ? "Available" : "Scan pending"}</small></span><ArrowRight size={13} /></button>)}</div>}</div><div className="detail-section"><div className="section-heading">Tags <button onClick={onToggleTagMenu} disabled={!selected.dbId || tagLoading}>{tagLoading ? "Saving…" : "Manage"}</button></div><div className="tag-list">{tags.length > 0 ? tags.map((tag) => <Badge key={tag.id} tone="info">{tag.name}</Badge>) : <span className="tag-empty">No tags assigned</span>}</div>{tagMenuOpen && <div className="tag-picker"><div className="tag-create"><input value={newTagName} onChange={(event) => onNewTagName(event.target.value)} placeholder="New custom tag" onKeyDown={(event) => { if (event.key === "Enter") onCreateTag(); }} /><button onClick={onCreateTag} disabled={tagLoading || !newTagName.trim()}><Plus size={13} /> Create</button></div>{availableTags.length > 0 ? availableTags.map((tag) => <button key={tag.id} onClick={() => onToggleTag(tag)} disabled={tagLoading} className={tags.some((current) => current.id === tag.id) ? "assigned" : ""}><span>{tag.name}</span>{tags.some((current) => current.id === tag.id) ? <Check size={13} /> : <Plus size={13} />}</button>) : <span className="tag-empty">No project tags available</span>}</div>}</div>{selected.endorsement && <div className="warning"><Info size={16} /><div><strong>Drawing endorsement</strong><span>Before this drawing is issued to the Client, it requires a formal endorsement from the Independent Design Checker (IDC), Independent Checking Engineer (ICE), or Client.</span></div><button onClick={onEndorsements}>View endorsements</button></div>}<div className="detail-section"><div className="section-heading">Linked across related COSMOS functions <button onClick={onLinks}>View linked records <ArrowRight size={13} /></button></div><div className="link-grid"><button onClick={onBim}><FolderOpen size={15} /><span>BIM viewer<small>Open authorized models</small></span><ChevronRight size={14} /></button><button onClick={onForms}><ClipboardList size={15} /><span>Form records<small>Open linked records</small></span><ChevronRight size={14} /></button><button onClick={onPhotos}><Paperclip size={15} /><span>Photo records<small>Open linked records</small></span><ChevronRight size={14} /></button></div></div><button className="inline-decision" onClick={onDecision}><ShieldCheck size={15} /> {selected.response === "Pending" ? "Record Client response" : `Client response ${selected.response}`} <ArrowRight size={14} /></button></div>;
+function Overview({ selected, canEdit, canDecide, onBim, onDecision, onEdit, onMove, onEndorsements, onLinks, onForms, onPhotos, files, filesLoading, filesError, onRetryFiles, onAttachFile, attachmentUploading, onDownloadFile, tags, availableTags, tagMenuOpen, tagLoading, newTagName, onNewTagName, onCreateTag, onToggleTag, onToggleTagMenu }: { selected: Container; canEdit: boolean; canDecide: boolean; onBim: () => void; onDecision: () => void; onEdit: () => void; onMove: () => void; onEndorsements: () => void; onLinks: () => void; onForms: () => void; onPhotos: () => void; files: ContainerFile[]; filesLoading: boolean; filesError: string; onRetryFiles: () => void; onAttachFile: () => void; attachmentUploading: boolean; onDownloadFile: (file: ContainerFile) => void; tags: ProjectTag[]; availableTags: ProjectTag[]; tagMenuOpen: boolean; tagLoading: boolean; newTagName: string; onNewTagName: (value: string) => void; onCreateTag: () => void; onToggleTag: (tag: ProjectTag) => void; onToggleTagMenu: () => void }) {
+  return <div className="drawer-content"><div className="bim-card"><div className="bim-thumb"><Box size={26} /><span>IFC / model</span></div><div className="bim-card-copy"><strong>BIM model revision {selected.rev}</strong><span>Model source · BIM viewer</span><button onClick={onBim} disabled={!selected.id}>Open BIM viewer <ArrowRight size={13} /></button></div></div><div className="detail-section"><div className="section-heading">Key information <span className="section-actions"><button onClick={onMove} disabled={!canEdit || (!selected.dbId && !selected.draftId)} title={!canEdit ? "Your project role cannot edit documents" : undefined}><FolderOpen size={13} /> Move</button><button onClick={onEdit} disabled={!selected.id || !canEdit} title={!canEdit ? "Your project role cannot edit documents" : undefined}><PenLine size={13} /> Edit</button></span></div><dl className="meta-grid"><dt>Document number</dt><dd>{selected.id}</dd><dt>Title</dt><dd>{selected.title}</dd><dt>Type</dt><dd>{selected.type}</dd><dt>Revision</dt><dd>{selected.rev}</dd><dt>Library folder</dt><dd>{selected.libraryFolder ? libraryFolderLabel(selected.libraryFolder) : "Not assigned"}</dd><dt>Suitability</dt><dd><Badge tone={badgeTone(selected.suitability)}>{selected.suitability} — For review and comment</Badge></dd><dt>Client response</dt><dd><Badge tone={badgeTone(selected.response)}>{selected.response}</Badge></dd><dt>Originator</dt><dd>{selected.originator}</dd><dt>Updated</dt><dd>{selected.updated}</dd></dl></div><div className="detail-section"><div className="section-heading">Files <span>{files.length}</span>{selected.draftId && <button onClick={onAttachFile} disabled={attachmentUploading}>{attachmentUploading ? "Uploading…" : "Attach file"}</button>}</div>{filesError ? <div className="data-state error" role="alert">{filesError}<button onClick={onRetryFiles}>Retry</button></div> : filesLoading ? <span role="status">Loading attachments…</span> : files.length === 0 ? <span className="tag-empty">No files attached</span> : <div className="file-list">{files.map((file) => <button key={`${file.id}-${file.revisionCode}`} onClick={() => onDownloadFile(file)} disabled={file.virusScanStatus !== "clean"}><FileText size={14} /><span><strong>{file.filename}</strong><small>{file.revisionCode} · {file.virusScanStatus === "clean" ? "Available" : file.virusScanStatus === "pending" ? "Scan pending" : "Blocked by file scan"}</small></span><ArrowRight size={13} /></button>)}</div>}</div><div className="detail-section"><div className="section-heading">Tags <button onClick={onToggleTagMenu} disabled={!selected.dbId || tagLoading}>{tagLoading ? "Saving…" : "Manage"}</button></div><div className="tag-list">{tags.length > 0 ? tags.map((tag) => <Badge key={tag.id} tone="info">{tag.name}</Badge>) : <span className="tag-empty">No tags assigned</span>}</div>{tagMenuOpen && <div className="tag-picker"><div className="tag-create"><input value={newTagName} onChange={(event) => onNewTagName(event.target.value)} placeholder="New custom tag" onKeyDown={(event) => { if (event.key === "Enter") onCreateTag(); }} /><button onClick={onCreateTag} disabled={tagLoading || !newTagName.trim()}><Plus size={13} /> Create</button></div>{availableTags.length > 0 ? availableTags.map((tag) => <button key={tag.id} onClick={() => onToggleTag(tag)} disabled={tagLoading} className={tags.some((current) => current.id === tag.id) ? "assigned" : ""}><span>{tag.name}</span>{tags.some((current) => current.id === tag.id) ? <Check size={13} /> : <Plus size={13} />}</button>) : <span className="tag-empty">No project tags available</span>}</div>}</div>{selected.endorsement && <div className="warning"><Info size={16} /><div><strong>Drawing endorsement</strong><span>Before this drawing is issued to the Client, it requires a formal endorsement from the Independent Design Checker (IDC), Independent Checking Engineer (ICE), or Client.</span></div><button onClick={onEndorsements}>View endorsements</button></div>}<div className="detail-section"><div className="section-heading">Linked across related COSMOS functions <button onClick={onLinks}>View linked records <ArrowRight size={13} /></button></div><div className="link-grid"><button onClick={onBim}><FolderOpen size={15} /><span>BIM viewer<small>Open authorized models</small></span><ChevronRight size={14} /></button><button onClick={onForms}><ClipboardList size={15} /><span>Form records<small>Open linked records</small></span><ChevronRight size={14} /></button><button onClick={onPhotos}><Paperclip size={15} /><span>Photo records<small>Open linked records</small></span><ChevronRight size={14} /></button></div></div><button className="inline-decision" onClick={onDecision} disabled={!canDecide} title={!canDecide ? "Client responses require a Client account and a sent transmittal" : undefined}><ShieldCheck size={15} /> {selected.response === "Pending" ? "Record Client response" : `Client response ${selected.response}`} <ArrowRight size={14} /></button></div>;
 }
 
 type WorkflowStep = {
@@ -1144,7 +1189,8 @@ function WorkflowPanel({ revisionId, projectCode = "P001", onComplete }: { revis
   const [verificationCode, setVerificationCode] = useState("");
 
   async function loadWorkflow() {
-    if (!revisionId) return;
+    if (!revisionId) { setSteps([]); setLoading(false); return; }
+    setSteps([]); setVerificationCode("");
     setLoading(true);
     setError("");
     try {
@@ -1160,7 +1206,7 @@ function WorkflowPanel({ revisionId, projectCode = "P001", onComplete }: { revis
     }
   }
 
-  useEffect(() => { void loadWorkflow(); }, [revisionId]);
+  useEffect(() => { void loadWorkflow(); }, [revisionId, projectCode]);
 
   async function signActiveStep() {
     const active = steps.find((step) => step.stepStatus === "in_progress");
@@ -1281,7 +1327,24 @@ function ActivityPanel({ audit, entityId, projectCode = "P001" }: { audit: strin
 }
 
 function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
-  return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className={`modal ${wide ? "modal-wide" : ""}`}><div className="modal-head"><strong>{title}</strong><button className="icon-button" onClick={onClose}><X size={17} /></button></div>{children}</div></div>;
+  const modalRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeRef.current(); }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(modalRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([hidden]), select:not(:disabled), textarea:not(:disabled), a[href]') ?? []).filter((element) => element.getClientRects().length);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", handleKey, true);
+    modalRef.current?.querySelector<HTMLElement>('input[autofocus], input:not([hidden]), button')?.focus();
+    return () => { document.removeEventListener("keydown", handleKey, true); previous?.focus(); };
+  }, []);
+  return <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={title}><div ref={modalRef} className={`modal ${wide ? "modal-wide" : ""}`}><div className="modal-head"><strong>{title}</strong><button className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={17} /></button></div>{children}</div></div>;
 }
 
 const connectorProviders: Array<{ id: ConnectorProvider; label: string; description: string; authMode: "oauth2" | "accessKey" }> = [
