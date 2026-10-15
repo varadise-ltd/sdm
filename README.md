@@ -178,6 +178,7 @@ node scripts/smoke-backend.mjs
 node scripts/smoke-files.mjs
 npm run test:browser
 npm run test:recovery
+npm run test:workflow
 ```
 
 The checks default to `http://localhost:3001`. Set `SDM_BASE_URL` when using
@@ -186,6 +187,10 @@ can select another installed Playwright browser channel. These tests create
 named local test records using small IFC and SVG fixtures. Screenshots and
 results are saved under `artifacts/functional-checks/`, which is excluded from
 Git.
+
+The workflow check covers adding and editing single-letter step keys, length
+limits, invalid input, and duplicate keys. It removes its inactive test template
+after the run.
 
 Docker development uses polling and a separate `.next-docker` directory so
 Windows builds cannot overwrite its running development assets.
